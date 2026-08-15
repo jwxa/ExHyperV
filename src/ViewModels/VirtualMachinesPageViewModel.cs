@@ -34,7 +34,7 @@ namespace ExHyperV.ViewModels
         private readonly VmGpuService _vmGpuService;
         private readonly IHostSessionRegistry _sessionRegistry;
         private readonly IHostOperationRouter _hostOperationRouter;
-        private readonly ActiveHostConsoleSessions _hostConsoleSessions;
+        private readonly HostConsoleSessions _hostConsoleSessions;
 
 
         // ===== 监控与后台任务字段 =====
@@ -119,10 +119,10 @@ namespace ExHyperV.ViewModels
         {
             _queryService = queryService;
             _vmGpuService = new VmGpuService(_queryService);
-            _sessionRegistry = sessionRegistry ?? ActiveHostSessions.Registry;
+            _sessionRegistry = sessionRegistry ?? HostSessions.Registry;
             _hostOperationRouter = hostOperationRouter
                 ?? new HostOperationRouter(_sessionRegistry, new HostWmiContextResolver());
-            _hostConsoleSessions = new ActiveHostConsoleSessions(_sessionRegistry);
+            _hostConsoleSessions = new HostConsoleSessions(_sessionRegistry);
 
             foreach (HostSessionSnapshot session in _sessionRegistry.Current.Hosts)
                 EnsureHostGroup(session);

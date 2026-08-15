@@ -104,27 +104,15 @@ internal static class CapabilityTests
             HasStaleData: false));
         HostCapability readCapability = coordinator.Current.Capabilities[HostCapabilityKind.VmRead];
         HostCapability writeCapability = coordinator.Current.Capabilities[HostCapabilityKind.VmWrite];
-        var operations = new ActiveHostVmOperations(coordinator, new HostWmiContextResolver());
-        bool readBackendCalled = false;
-        bool writeBackendCalled = false;
-
-        HostVmReadResult<string> read = operations.ReadAsync(
-            (_, _) =>
-            {
-                readBackendCalled = true;
-                return Task.FromResult("unexpected");
-            }).GetAwaiter().GetResult();
-        HostVmWriteResult write = operations.WriteAsync(
-            (_, _) =>
-            {
-                writeBackendCalled = true;
-                return Task.FromResult(HostVmBackendWriteResult.Success());
-            }).GetAwaiter().GetResult();
-
-        TestAssert.False(readBackendCalled, "A disabled VM read reached the backend.");
-        TestAssert.False(writeBackendCalled, "A disabled VM write reached the backend.");
-        TestAssert.Equal(readCapability.Reason, read.Message);
-        TestAssert.Equal(writeCapability.Reason, write.Message);
+        TestAssert.False(
+            coordinator.TryCaptureManagementOperation(out _, out string readReason),
+            "A disabled VM read captured a management context.");
+        TestAssert.False(
+            coordinator.TryBeginWrite(out IHostWriteLease? lease, out string writeReason),
+            "A disabled VM write acquired a lease.");
+        lease?.Dispose();
+        TestAssert.Equal(readCapability.Reason, readReason);
+        TestAssert.Equal(writeCapability.Reason, writeReason);
 
         coordinator.CommitActiveSession(new ActiveHostSession(
             3,

@@ -3,7 +3,7 @@ using ExHyperV.Services.Remote.Profiles;
 
 namespace ExHyperV.Services.Remote.Sessions;
 
-public sealed class ActiveHostSessionCoordinator : IActiveHostSessionCoordinator
+public sealed class ActiveHostSessionCoordinator
 {
     private readonly object _sync = new();
     private readonly IHostSessionConnector _connector;
@@ -80,8 +80,6 @@ public sealed class ActiveHostSessionCoordinator : IActiveHostSessionCoordinator
         Publish(change);
     }
 
-    public void ResetToLocal() => SwitchToLocalAsync().GetAwaiter().GetResult();
-
     public async Task<HostSwitchResult> SwitchToSelectedAsync(
         HostSwitchRequest request,
         CancellationToken cancellationToken = default)
@@ -107,7 +105,7 @@ public sealed class ActiveHostSessionCoordinator : IActiveHostSessionCoordinator
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            AppLog.Information("宿主切换", $"开始准备远程宿主 {profile.DisplayName}。", CreateLogContext(profile, originalGeneration));
+            AppLog.Information("宿主会话", $"开始连接远程宿主 {profile.DisplayName}。", CreateLogContext(profile, originalGeneration));
             candidate = await _connector.ConnectAsync(request with { Profile = profile }, cancellationToken);
             ValidateCandidate(profile, candidate);
             HostBasicSnapshot snapshot = await _snapshotLoader.LoadAsync(candidate, cancellationToken);
@@ -119,14 +117,14 @@ public sealed class ActiveHostSessionCoordinator : IActiveHostSessionCoordinator
                 {
                     return ResultLocked(
                         HostSwitchStatus.Shutdown,
-                        "应用正在关闭，未切换活动宿主。");
+                        "应用正在关闭，未建立目标宿主会话。");
                 }
                 if (_current.ActiveSession.Generation != originalGeneration
                     || _current.SelectedProfile != profile)
                 {
                     return ResultLocked(
                         HostSwitchStatus.StaleSelection,
-                        "候选主机准备完成前选择、主机配置或活动会话已改变，未执行切换。");
+                        "候选主机准备完成前选择、主机配置或目标会话已改变，未建立连接。");
                 }
 
                 long nextGeneration = checked(originalGeneration + 1);
@@ -155,92 +153,23 @@ public sealed class ActiveHostSessionCoordinator : IActiveHostSessionCoordinator
 
             Publish(change);
             if (previousCandidate is not null) await DisposeCandidateAsync(previousCandidate);
-            AppLog.Information("宿主切换", $"远程宿主 {profile.DisplayName} 已原子激活。", CreateLogContext(profile, originalGeneration + 1));
-            return new HostSwitchResult(HostSwitchStatus.Succeeded, "活动宿主切换成功。", Current);
+            AppLog.Information("宿主会话", $"远程宿主 {profile.DisplayName} 会话准备完成。", CreateLogContext(profile, originalGeneration + 1));
+            return new HostSwitchResult(HostSwitchStatus.Succeeded, "远程宿主会话连接成功。", Current);
         }
         catch (OperationCanceledException)
         {
-            AppLog.Warning("宿主切换", $"切换到 {profile.DisplayName} 已取消。", CreateLogContext(profile, originalGeneration, "Cancelled"));
-            return Result(HostSwitchStatus.Cancelled, "宿主切换已取消，原活动宿主保持不变。");
+            AppLog.Warning("宿主会话", $"连接 {profile.DisplayName} 已取消。", CreateLogContext(profile, originalGeneration, "Cancelled"));
+            return Result(HostSwitchStatus.Cancelled, "宿主连接已取消，未发布远程宿主。");
         }
         catch (Exception ex)
         {
-            AppLog.Error("宿主切换", $"切换到 {profile.DisplayName} 失败，原活动宿主保持不变。", CreateLogContext(profile, originalGeneration, "ConnectionFailed"), ex);
-            return Result(HostSwitchStatus.Failed, $"宿主切换失败：{SensitiveDataRedactor.Redact(ex.Message)}");
+            AppLog.Error("宿主会话", $"连接 {profile.DisplayName} 失败，现有宿主会话保持不变。", CreateLogContext(profile, originalGeneration, "ConnectionFailed"), ex);
+            return Result(HostSwitchStatus.Failed, $"宿主连接失败：{SensitiveDataRedactor.Redact(ex.Message)}");
         }
         finally
         {
             ActiveHostStateChangedEventArgs? capabilityChange = null;
             if (!committed && candidate is not null) await DisposeCandidateAsync(candidate);
-            if (!committed)
-            {
-                lock (_sync)
-                {
-                    if (!_isShutdown) _isWriteFrozen = false;
-                    _switchInProgress = false;
-                    capabilityChange = RefreshCapabilitiesLocked();
-                }
-            }
-            Publish(capabilityChange);
-        }
-    }
-
-    public async Task<HostSwitchResult> SwitchToLocalAsync(CancellationToken cancellationToken = default)
-    {
-        await StopReconnectAndWaitAsync();
-        long originalGeneration;
-        HostSwitchResult? blocked;
-        ActiveHostStateChangedEventArgs? freezeChange;
-        lock (_sync)
-        {
-            blocked = TryFreezeForSwitchLocked(expectedProfileId: null, out originalGeneration, requireSelectionMatch: false);
-            freezeChange = blocked is null ? RefreshCapabilitiesLocked() : null;
-        }
-        if (blocked is not null) return blocked;
-        Publish(freezeChange);
-
-        IHostSessionCandidate? previousCandidate = null;
-        ActiveHostStateChangedEventArgs? change = null;
-        bool committed = false;
-        try
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            lock (_sync)
-            {
-                if (_isShutdown)
-                    return ResultLocked(HostSwitchStatus.Shutdown, "应用正在关闭，未切换活动宿主。");
-                if (_current.ActiveSession.Generation != originalGeneration)
-                    return ResultLocked(HostSwitchStatus.StaleSelection, "活动会话已改变，未切回本机。");
-
-                bool alreadyLocal = _current.ActiveSession.Target.IsLocal;
-                long nextGeneration = alreadyLocal
-                    ? originalGeneration
-                    : checked(originalGeneration + 1);
-                var next = new ActiveHostCoordinatorSnapshot(
-                    ActiveHostSession.CreateLocal(nextGeneration),
-                    selectedProfile: null,
-                    basicSnapshot: null);
-                previousCandidate = _activeCandidate;
-                _activeCandidate = null;
-                _activeRequest = null;
-                _isWriteFrozen = false;
-                _switchInProgress = false;
-                committed = true;
-                change = SetCurrentLocked(next);
-            }
-
-            Publish(change);
-            if (previousCandidate is not null) await DisposeCandidateAsync(previousCandidate);
-            AppLog.Information("宿主切换", "用户已切回本地计算机。", new AppLogContext(SessionGeneration: Current.ActiveSession.Generation));
-            return new HostSwitchResult(HostSwitchStatus.Succeeded, "已切回本地计算机。", Current);
-        }
-        catch (OperationCanceledException)
-        {
-            return Result(HostSwitchStatus.Cancelled, "切回本机已取消，原活动宿主保持不变。");
-        }
-        finally
-        {
-            ActiveHostStateChangedEventArgs? capabilityChange = null;
             if (!committed)
             {
                 lock (_sync)
@@ -831,13 +760,13 @@ public sealed class ActiveHostSessionCoordinator : IActiveHostSessionCoordinator
         lock (_sync)
         {
             if (session.Generation <= _current.ActiveSession.Generation)
-                throw new InvalidOperationException("新活动宿主会话必须使用更高的会话代次。");
+                throw new InvalidOperationException("新宿主会话必须使用更高的会话代次。");
             if (session.Target.IsLocal)
-                throw new InvalidOperationException("返回本机必须使用 ResetToLocal。");
+                throw new InvalidOperationException("每宿主会话引擎只接受远程目标。");
             if (_current.SelectedProfile?.Id != session.Target.ProfileId)
-                throw new InvalidOperationException("新活动宿主会话必须对应当前选中的主机配置。");
+                throw new InvalidOperationException("新宿主会话必须对应当前选中的主机配置。");
             if (session.ConnectionState == HostConnectionState.LocalConnected)
-                throw new InvalidOperationException("远程活动宿主不能使用本机连接状态。");
+                throw new InvalidOperationException("远程宿主不能使用本机连接状态。");
             change = SetCurrentLocked(_current with { ActiveSession = session });
         }
         Publish(change);
@@ -850,13 +779,13 @@ public sealed class ActiveHostSessionCoordinator : IActiveHostSessionCoordinator
     {
         originalGeneration = _current.ActiveSession.Generation;
         if (_isShutdown)
-            return ResultLocked(HostSwitchStatus.Shutdown, "应用正在关闭，不能切换活动宿主。");
+            return ResultLocked(HostSwitchStatus.Shutdown, "应用正在关闭，不能建立宿主连接。");
         if (_switchInProgress)
-            return ResultLocked(HostSwitchStatus.SwitchInProgress, "已有宿主切换正在进行。" );
+            return ResultLocked(HostSwitchStatus.SwitchInProgress, "已有宿主连接正在进行。" );
         if (_activeWriteCount > 0)
-            return ResultLocked(HostSwitchStatus.BlockedByActiveWrites, $"当前有 {_activeWriteCount} 个写操作尚未完成，不能切换宿主。" );
+            return ResultLocked(HostSwitchStatus.BlockedByActiveWrites, $"当前有 {_activeWriteCount} 个写操作尚未完成，不能建立宿主连接。" );
         if (requireSelectionMatch && _current.SelectedProfile?.Id != expectedProfileId)
-            return ResultLocked(HostSwitchStatus.NoSelection, "目标主机不是当前选中的配置，请重新选择后再切换。" );
+            return ResultLocked(HostSwitchStatus.NoSelection, "目标主机不是当前选中的配置，请重新选择后再连接。" );
 
         _switchInProgress = true;
         _isWriteFrozen = true;

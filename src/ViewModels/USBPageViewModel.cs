@@ -11,7 +11,6 @@ namespace ExHyperV.ViewModels
     {
         // ===== 字段 =====
 
-        private readonly IActiveHostSessionCoordinator _hostCoordinator = ActiveHostSessions.Current;
         private CancellationTokenSource? _localWorkCts;
 
         // ===== 绑定属性与命令 =====
@@ -25,8 +24,7 @@ namespace ExHyperV.ViewModels
 
         public USBPageViewModel()
         {
-            _hostCoordinator.StateChanged += OnActiveHostStateChanged;
-            ApplyCapabilities(_hostCoordinator.Current.Capabilities);
+            ApplyCapabilities(HostSessions.Registry.Current.GetRequired(HostId.Local).Capabilities);
         }
 
         // ===== 业务方法 =====
@@ -144,9 +142,6 @@ namespace ExHyperV.ViewModels
         /// </summary>
         [RelayCommand]
         private void OpenUrl(string url) => Shell.OpenUrl(url);
-
-        private void OnActiveHostStateChanged(object? sender, ActiveHostStateChangedEventArgs e) =>
-            App.Current.Dispatcher.InvokeAsync(() => ApplyCapabilities(e.Current.Capabilities));
 
         private void ApplyCapabilities(HostCapabilityMatrix capabilities)
         {

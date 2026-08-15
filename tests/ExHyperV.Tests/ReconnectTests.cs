@@ -14,9 +14,7 @@ internal static class ReconnectTests
         ("Reconnect_UserCanStopWithoutLocalFallback", UserCanStopWithoutLocalFallback),
         ("Reconnect_ImmediateRetrySkipsPendingDelay", ImmediateRetrySkipsPendingDelay),
         ("Reconnect_SuccessPublishesFreshGeneration", SuccessPublishesFreshGeneration),
-        ("Reconnect_RemoteWmiTimeoutStartsReconnect", RemoteWmiTimeoutStartsReconnect),
         ("Reconnect_PostConfigurationManagementLossStartsReconnect", PostConfigurationManagementLossStartsReconnect),
-        ("Reconnect_BusinessFailureDoesNotStartReconnect", BusinessFailureDoesNotStartReconnect),
         ("Reconnect_WaitsForActiveWriteLease", WaitsForActiveWriteLease),
         ("Reconnect_RegistersAndReleasesTaskOwnership", RegistersAndReleasesTaskOwnership),
         ("Reconnect_SelectionChangeKeepsActiveHostReconnect", SelectionChangeKeepsActiveHostReconnect),
@@ -177,26 +175,6 @@ internal static class ReconnectTests
         TestAssert.Equal(0, recovered.DisposeCount);
     }
 
-    private static void RemoteWmiTimeoutStartsReconnect()
-    {
-        HostProfile profile = Profile("10.0.0.26");
-        var reconnectStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var connector = new SequenceConnector((call, _, token) => call == 1
-            ? Task.FromResult<IHostSessionCandidate>(new FakeCandidate(profile))
-            : WaitForCancellationAsync(reconnectStarted, token));
-        var coordinator = ConnectedCoordinator(profile, connector, new ImmediateSnapshotLoader());
-        var operations = new ActiveHostVmOperations(coordinator, new HostWmiContextResolver());
-
-        HostVmReadResult<string> result = operations.ReadAsync<string>(
-            (_, _) => throw new TimeoutException("模拟 WMI 超时。"))
-            .GetAwaiter().GetResult();
-
-        WaitUntil(() => reconnectStarted.Task.IsCompleted, "Remote WMI timeout did not start reconnect.");
-        TestAssert.Equal(HostVmOperationStatus.Failed, result.Status);
-        TestAssert.True(coordinator.Current.ActiveSession.HasStaleData, "Remote WMI timeout did not mark data stale.");
-        coordinator.StopReconnect();
-    }
-
     private static void PostConfigurationManagementLossStartsReconnect()
     {
         HostProfile profile = Profile("10.0.0.34");
@@ -225,23 +203,6 @@ internal static class ReconnectTests
         TestAssert.Null(lease, "Rejected post-configuration write returned a lease.");
         TestAssert.Contains("中断", reason);
         coordinator.StopReconnect();
-    }
-
-    private static void BusinessFailureDoesNotStartReconnect()
-    {
-        HostProfile profile = Profile("10.0.0.27");
-        var connector = new SequenceConnector((_, _, _) =>
-            Task.FromResult<IHostSessionCandidate>(new FakeCandidate(profile)));
-        var coordinator = ConnectedCoordinator(profile, connector, new ImmediateSnapshotLoader());
-        var operations = new ActiveHostVmOperations(coordinator, new HostWmiContextResolver());
-
-        HostVmReadResult<string> result = operations.ReadAsync<string>(
-            (_, _) => throw new InvalidOperationException("虚拟机对象不存在。"))
-            .GetAwaiter().GetResult();
-
-        TestAssert.Equal(HostVmOperationStatus.Failed, result.Status);
-        TestAssert.False(coordinator.Current.ActiveSession.HasStaleData, "Business failure incorrectly marked the host stale.");
-        TestAssert.Equal(1, connector.CallCount);
     }
 
     private static void WaitsForActiveWriteLease()

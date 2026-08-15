@@ -9,7 +9,9 @@ internal static class HostSessionRegistryTests
         ("VmIdentity_ScopesVmIdToOwningHost", ScopesVmIdToOwningHost),
         ("HostRegistry_StartsWithFixedLocalSession", StartsWithFixedLocalSession),
         ("HostRegistry_ConnectsTwoRemoteHostsWithoutReplacingLocal", ConnectsTwoRemoteHostsWithoutReplacingLocal),
+        ("HostRegistry_FailedConnectDoesNotPublishPartialHost", FailedConnectDoesNotPublishPartialHost),
         ("HostRegistry_ReconnectAdvancesOnlyTargetHostGeneration", ReconnectAdvancesOnlyTargetHostGeneration),
+        ("HostRegistry_BasicSnapshotUsesLocaleIndependentVmSummary", BasicSnapshotUsesLocaleIndependentVmSummary),
         ("HostConnectionPage_UsesSharedRegistryWithoutLocalSwitch", HostConnectionPageUsesSharedRegistryWithoutLocalSwitch)
     ];
 
@@ -123,6 +125,47 @@ internal static class HostSessionRegistryTests
         }
     }
 
+    private static void FailedConnectDoesNotPublishPartialHost()
+    {
+        HostProfile profile = Profile(
+            "77777777-7777-7777-7777-777777777777",
+            "失败宿主",
+            "10.0.0.10");
+        var connectionFailure = new HostSessionRegistry(
+            new FailingConnector(),
+            new RegistrySnapshotLoader());
+
+        HostConnectResult failedConnect = connectionFailure.ConnectAsync(Request(profile)).GetAwaiter().GetResult();
+
+        TestAssert.Equal(HostConnectStatus.Failed, failedConnect.Status);
+        TestAssert.Equal(1, connectionFailure.Current.Hosts.Count);
+        TestAssert.Equal(HostId.Local, connectionFailure.Current.Hosts[0].HostId);
+        connectionFailure.Shutdown();
+
+        var candidate = new TrackingCandidate(profile);
+        var snapshotFailure = new HostSessionRegistry(
+            new SingleCandidateConnector(candidate),
+            new FailingSnapshotLoader());
+
+        HostConnectResult failedSnapshot = snapshotFailure.ConnectAsync(Request(profile)).GetAwaiter().GetResult();
+
+        TestAssert.Equal(HostConnectStatus.Failed, failedSnapshot.Status);
+        TestAssert.Equal(1, snapshotFailure.Current.Hosts.Count);
+        TestAssert.Equal(1, candidate.DisposeCount);
+        snapshotFailure.Shutdown();
+    }
+
+    private static void BasicSnapshotUsesLocaleIndependentVmSummary()
+    {
+        string loader = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(), "src", "Services", "Remote", "Windows", "WindowsHostBasicSnapshotLoader.cs"));
+
+        TestAssert.Contains("SELECT Name FROM Msvm_SummaryInformation", loader);
+        TestAssert.False(
+            loader.Contains("Caption = 'Virtual Machine'", StringComparison.Ordinal),
+            "The basic snapshot still depends on a localized Msvm_ComputerSystem caption.");
+    }
+
     private static HostSessionSnapshot Session(HostRegistrySnapshot snapshot, HostId hostId) =>
         snapshot.Hosts.Single(host => host.HostId == hostId);
 
@@ -155,8 +198,21 @@ internal static class HostSessionRegistryTests
             "The connection confirmation still describes a global active-host switch.");
         TestAssert.False(page.Contains("正在切换", StringComparison.Ordinal),
             "The connection button still describes connecting as a host switch.");
-        TestAssert.Contains("ActiveHostSessions.Registry", codeBehind);
-        TestAssert.Contains("ActiveHostSessions.Registry.Shutdown()", app);
+        TestAssert.Contains("HostSessions.Registry", codeBehind);
+        TestAssert.Contains("HostSessions.Registry.Shutdown()", app);
+        int selectionUpdateStart = viewModel.IndexOf(
+            "private void OnSelectionPropertiesChanged()",
+            StringComparison.Ordinal);
+        int selectionUpdateEnd = viewModel.IndexOf(
+            "private HostRepairDecision CurrentRepairDecision",
+            selectionUpdateStart,
+            StringComparison.Ordinal);
+        TestAssert.True(
+            selectionUpdateStart >= 0 && selectionUpdateEnd > selectionUpdateStart,
+            "The selected-host property update method could not be located.");
+        TestAssert.Contains(
+            "UpdateSelectedHostProperties();",
+            viewModel[selectionUpdateStart..selectionUpdateEnd]);
     }
 
     private static string FindRepositoryRoot()
@@ -233,6 +289,45 @@ internal static class HostSessionRegistryTests
                 "Running",
                 1,
                 new DateTimeOffset(2026, 8, 15, 18, 0, 0, TimeSpan.FromHours(8))));
+    }
+
+    private sealed class FailingConnector : IHostSessionConnector
+    {
+        public Task<IHostSessionCandidate> ConnectAsync(
+            HostSwitchRequest request,
+            CancellationToken cancellationToken) =>
+            throw new HostSwitchException("模拟连接失败。");
+    }
+
+    private sealed class SingleCandidateConnector(TrackingCandidate candidate) : IHostSessionConnector
+    {
+        public Task<IHostSessionCandidate> ConnectAsync(
+            HostSwitchRequest request,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IHostSessionCandidate>(candidate);
+    }
+
+    private sealed class TrackingCandidate(HostProfile profile) : IHostSessionCandidate
+    {
+        public HostTarget Target { get; } = HostTarget.FromProfile(profile);
+        public IHostManagementConnection ManagementConnection { get; } = new RegistryConnection();
+        public HostChannelState ManagementChannel => HostChannelState.Available;
+        public HostChannelState ConsoleChannel => HostChannelState.Available;
+        public int DisposeCount { get; private set; }
+
+        public ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class FailingSnapshotLoader : IHostBasicSnapshotLoader
+    {
+        public Task<HostBasicSnapshot> LoadAsync(
+            IHostSessionCandidate candidate,
+            CancellationToken cancellationToken) =>
+            throw new HostSwitchException("模拟快照失败。");
     }
 
     private sealed class ImmediateReconnectScheduler : IReconnectScheduler

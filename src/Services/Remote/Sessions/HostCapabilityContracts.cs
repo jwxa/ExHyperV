@@ -112,13 +112,13 @@ public sealed class HostCapabilityMatrix : IEquatable<HostCapabilityMatrix>
     {
         if (isSwitching)
             return ReadOnly(HostCapabilityKind.VmRead, HostCapabilityReasonCode.HostSwitchInProgress,
-                "活动宿主正在切换，当前快照暂时只读。");
+                "目标宿主正在连接，当前快照暂时只读。");
         if (session.HasStaleData)
             return ReadOnly(HostCapabilityKind.VmRead, HostCapabilityReasonCode.StaleData,
                 "当前显示的是断线前的旧数据，重连成功后才会刷新。");
         if (session.ManagementChannel != HostChannelState.Available)
             return Unavailable(HostCapabilityKind.VmRead, HostCapabilityReasonCode.ManagementChannelUnavailable,
-                "活动宿主的 WMI/DCOM 管理通道不可用，无法读取虚拟机数据。");
+                "目标宿主的 WMI/DCOM 管理通道不可用，无法读取虚拟机数据。");
         return Available(HostCapabilityKind.VmRead);
     }
 
@@ -126,13 +126,13 @@ public sealed class HostCapabilityMatrix : IEquatable<HostCapabilityMatrix>
     {
         if (isSwitching)
             return Unavailable(HostCapabilityKind.VmWrite, HostCapabilityReasonCode.HostSwitchInProgress,
-                "活动宿主正在切换，暂时不能执行虚拟机写操作。");
+                "目标宿主正在连接，暂时不能执行虚拟机写操作。");
         if (session.HasStaleData)
             return Unavailable(HostCapabilityKind.VmWrite, HostCapabilityReasonCode.StaleData,
-                "活动宿主连接已中断，当前显示的是旧数据，写操作将在重连成功后恢复。");
+                "目标宿主连接已中断，当前显示的是旧数据，写操作将在重连成功后恢复。");
         if (session.ManagementChannel != HostChannelState.Available)
             return Unavailable(HostCapabilityKind.VmWrite, HostCapabilityReasonCode.ManagementChannelUnavailable,
-                "活动宿主的 WMI/DCOM 管理通道不可用，不能执行虚拟机写操作。");
+                "目标宿主的 WMI/DCOM 管理通道不可用，不能执行虚拟机写操作。");
         return Available(HostCapabilityKind.VmWrite);
     }
 
@@ -140,13 +140,13 @@ public sealed class HostCapabilityMatrix : IEquatable<HostCapabilityMatrix>
     {
         if (isSwitching)
             return Unavailable(HostCapabilityKind.VmConsole, HostCapabilityReasonCode.HostSwitchInProgress,
-                "活动宿主正在切换，暂时不能打开虚拟机控制台。");
+                "目标宿主正在连接，暂时不能打开虚拟机控制台。");
         if (session.HasStaleData)
             return Unavailable(HostCapabilityKind.VmConsole, HostCapabilityReasonCode.StaleData,
-                "活动宿主连接已中断，控制台将在重连成功后恢复。");
+                "目标宿主连接已中断，控制台将在重连成功后恢复。");
         if (session.ConsoleChannel != HostChannelState.Available)
             return Unavailable(HostCapabilityKind.VmConsole, HostCapabilityReasonCode.ConsoleChannelUnavailable,
-                "活动宿主的 TCP 2179 控制台通道不可用。");
+                "目标宿主的 TCP 2179 控制台通道不可用。");
         return Available(HostCapabilityKind.VmConsole);
     }
 
@@ -154,7 +154,7 @@ public sealed class HostCapabilityMatrix : IEquatable<HostCapabilityMatrix>
     {
         if (isSwitching)
             return Unavailable(kind, HostCapabilityReasonCode.HostSwitchInProgress,
-                "活动宿主正在切换，暂时不能使用本机专属功能。");
+                "目标宿主正在连接，暂时不能使用本机专属功能。");
         if (!isLocal)
             return Unavailable(kind, HostCapabilityReasonCode.RemoteNotSupported, RemoteUnsupportedReason(kind));
         return Available(kind);

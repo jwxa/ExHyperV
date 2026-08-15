@@ -1,6 +1,6 @@
 # Privacy Policy for ExHyperV / 隐私政策
 
-**Last updated / 生效日期**: 2026-08-14
+**Last updated / 生效日期**: 2026-08-15
 
 ExHyperV is a free and open-source graphical Hyper-V management tool. It does not include usage telemetry, advertising identifiers, or an ExHyperV-operated cloud service.
 
@@ -21,6 +21,8 @@ ExHyperV 是一款开源免费的图形化 Hyper-V 管理工具，不包含使�
 - 本地宿主操作在运行 ExHyperV 的计算机上执行。
 - When you explicitly diagnose, configure, connect to, or manage a saved remote host, ExHyperV communicates directly with the selected unicast IPv4 address. The feature is designed for controlled LAN hosts. WMI/DCOM is used for supported Hyper-V management operations, and TCP 2179 is used for the VM console.
 - 当您明确检测、配置、连接或管理已保存的远程宿主时，ExHyperV 会直接访问所选单播 IPv4 地址；该功能用于受控局域网宿主。受支持的 Hyper-V 管理操作使用 WMI/DCOM，虚拟机控制台使用 TCP 2179。
+- Saved profiles are not connected automatically. ExHyperV can maintain direct connections to multiple hosts that you explicitly connect; disconnecting one host stops its session without removing its saved profile or the always-present local host.
+- 已保存的配置不会自动连接。ExHyperV 可以同时维持多台由您明确连接的远程宿主；断开其中一台只会终止该宿主会话，不会删除其已保存配置，也不会移除始终存在的本机宿主。
 - The configuration wizard can start a target-local PowerShell process through WMI/DCOM only after showing a change preview and receiving the exact Chinese confirmation `确认`.
 - 配置向导仅在展示修改预览并收到完全一致的中文确认文本 `确认` 后，才会通过 WMI/DCOM 在目标宿主本地启动 PowerShell 进程。
 - ExHyperV does not route remote-host traffic through an ExHyperV server, proxy, agent, WinRM, or SSH.

@@ -23,7 +23,7 @@ internal sealed record PartialAvailabilityEvidence(
 internal static class PartialAvailabilityAcceptance
 {
     public static PartialAvailabilityEvidence Evaluate(
-        ActiveHostCoordinatorSnapshot snapshot,
+        HostSessionSnapshot snapshot,
         bool managementReadSucceeded,
         HostConsoleSessionCapture capture)
     {

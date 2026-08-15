@@ -36,13 +36,12 @@ tests.AddRange(HostSessionRegistryReconnectTests.All);
 tests.AddRange(HostDisconnectTests.All);
 tests.AddRange(HostOperationRouterTests.All);
 tests.AddRange(VirtualMachinesMultiHostWiringTests.All);
-tests.AddRange(SessionSwitchTests.All);
-tests.AddRange(VmOperationTests.All);
 tests.AddRange(ConsoleSessionTests.All);
 tests.AddRange(HostConsoleRegistryTests.All);
 tests.AddRange(HostLogFeedTests.All);
 tests.AddRange(HostLogViewModelTests.All);
 tests.AddRange(HostRepairRecommendationTests.All);
+tests.AddRange(ReleaseConvergenceTests.All);
 tests.AddRange(ReconnectTests.All);
 tests.AddRange(CapabilityTests.All);
 tests.AddRange(PreflightTests.All);
@@ -555,23 +554,7 @@ static void SessionStateEventsContainImmutableCoherentSnapshots()
     coordinator.StateChanged += (_, change) => changes.Add(change);
 
     coordinator.SelectProfile(profile);
-    coordinator.SelectProfile(profile);
     coordinator.StateChanged += (_, _) => throw new InvalidOperationException("Subscriber failure must be isolated.");
-    coordinator.ResetToLocal();
-
-    Assert.Equal(3, changes.Count);
-    Assert.Null(changes[0].Previous.SelectedProfile, "First event must contain the pre-selection snapshot.");
-    Assert.Equal(profile, changes[0].Current.SelectedProfile);
-    Assert.Equal(profile, changes[1].Previous.SelectedProfile);
-    Assert.Equal(
-        HostCapabilityReasonCode.HostSwitchInProgress,
-        changes[1].Current.Capabilities[HostCapabilityKind.VmWrite].ReasonCode);
-    Assert.Equal(1L, changes[1].Current.ActiveSession.Generation);
-    Assert.Null(changes[2].Current.SelectedProfile, "Resetting an already-local session must only clear selection.");
-    Assert.Equal(1L, changes[2].Current.ActiveSession.Generation);
-    Assert.Equal(HostCapabilityReasonCode.None, changes[2].Current.Capabilities[HostCapabilityKind.VmWrite].ReasonCode);
-
-    coordinator.SelectProfile(profile);
     coordinator.CommitActiveSession(new ActiveHostSession(
         2,
         HostTarget.FromProfile(profile),
@@ -579,16 +562,15 @@ static void SessionStateEventsContainImmutableCoherentSnapshots()
         HostChannelState.Available,
         HostChannelState.Available,
         HasStaleData: false));
-    coordinator.ResetToLocal();
 
-    Assert.Equal(7, changes.Count);
-    Assert.Equal(
-        HostCapabilityReasonCode.HostSwitchInProgress,
-        changes[5].Current.Capabilities[HostCapabilityKind.VmWrite].ReasonCode);
-    Assert.Equal(2L, changes[5].Current.ActiveSession.Generation);
-    Assert.Equal(3L, changes[6].Current.ActiveSession.Generation);
-    Assert.True(changes[6].Current.ActiveSession.Target.IsLocal, "Reset must publish a local active session.");
-    Assert.Null(changes[6].Current.SelectedProfile, "Returning to local must clear the remote profile selection.");
+    Assert.Equal(2, changes.Count);
+    Assert.Null(changes[0].Previous.SelectedProfile, "First event must contain the pre-selection snapshot.");
+    Assert.Equal(profile, changes[0].Current.SelectedProfile);
+    Assert.Equal(1L, changes[1].Previous.ActiveSession.Generation);
+    Assert.Equal(2L, changes[1].Current.ActiveSession.Generation);
+    Assert.Equal(profile.Id, changes[1].Current.ActiveSession.Target.ProfileId);
+    Assert.Equal(HostCapabilityReasonCode.None,
+        changes[1].Current.Capabilities[HostCapabilityKind.VmWrite].ReasonCode);
 }
 
 static void ConcurrentSelectionKeepsLocalSessionCoherent()

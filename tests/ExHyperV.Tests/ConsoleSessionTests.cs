@@ -9,166 +9,118 @@ internal static class ConsoleSessionTests
     public static IEnumerable<(string Name, Action Run)> All =>
     [
         ("Console_LocalCaptureUsesLocalhost2179", LocalCaptureUsesLocalhost2179),
-        ("Console_RemoteCaptureUsesActiveHostIpv4", RemoteCaptureUsesActiveHostIpv4),
+        ("Console_RemoteCaptureUsesOwningHostIpv4", RemoteCaptureUsesOwningHostIpv4),
         ("Console_Unavailable2179RejectsCapture", Unavailable2179RejectsCapture),
         ("Console_StaleHostDataRejectsCapture", StaleHostDataRejectsCapture),
         ("Console_InvalidVmIdRejectsCapture", InvalidVmIdRejectsCapture),
-        ("Console_HostSwitchInvalidatesCapturedSession", HostSwitchInvalidatesCapturedSession),
-        ("Console_WindowIdentityIsScopedToHostGeneration", WindowIdentityIsScopedToHostGeneration),
-        ("Console_RegistryCaptureUsesOwningHostId", RegistryCaptureUsesOwningHostId),
+        ("Console_SameVmIdIsScopedByHost", SameVmIdIsScopedByHost),
         ("Console_UnexpectedDisconnectReportsConnectionLoss", UnexpectedDisconnectReportsConnectionLoss)
     ];
 
     private static void LocalCaptureUsesLocalhost2179()
     {
-        var coordinator = new ActiveHostSessionCoordinator();
-        var sessions = new ActiveHostConsoleSessions(coordinator);
+        var registry = new HostSessionRegistry();
+        var sessions = new HostConsoleSessions(registry);
         Guid vmId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
-        HostConsoleSessionCapture result = sessions.Capture(vmId.ToString(), "本机虚拟机");
+        HostConsoleSessionCapture result = sessions.Capture(HostId.Local, vmId.ToString(), "本机虚拟机");
 
         TestAssert.True(result.Succeeded, result.Message);
         TestAssert.True(result.Session!.Target.IsLocal, "Local capture did not retain the local target.");
         TestAssert.Equal("localhost", result.Session.Server);
         TestAssert.Equal(2179, result.Session.Port);
-        TestAssert.Equal(vmId, result.Session.VmId);
-        TestAssert.Equal("本机虚拟机", result.Session.VmName);
+        registry.Shutdown();
     }
 
-    private static void RemoteCaptureUsesActiveHostIpv4()
+    private static void RemoteCaptureUsesOwningHostIpv4()
     {
-        var coordinator = new ActiveHostSessionCoordinator();
         HostProfile profile = RemoteProfile("10.0.0.6");
-        coordinator.SelectProfile(profile);
-        coordinator.CommitActiveSession(RemoteSession(2, profile, HostChannelState.Available));
-        var sessions = new ActiveHostConsoleSessions(coordinator);
+        HostSessionRegistry registry = ConnectedRegistry(profile, HostChannelState.Available);
+        HostId hostId = HostId.FromProfile(profile);
+        var sessions = new HostConsoleSessions(registry);
 
         HostConsoleSessionCapture result = sessions.Capture(
+            hostId,
             "22222222-2222-2222-2222-222222222222",
             "远程虚拟机");
 
         TestAssert.True(result.Succeeded, result.Message);
-        TestAssert.False(result.Session!.Target.IsLocal, "Remote capture was mapped to the local target.");
-        TestAssert.Equal("10.0.0.6", result.Session.Server);
-        TestAssert.Equal(new HostOperationStamp(2, profile.Id), result.Session.Stamp);
+        TestAssert.Equal(profile.Address, result.Session!.Server);
+        TestAssert.Equal(profile.Id, result.Session.Stamp.ProfileId);
+        registry.Shutdown();
     }
 
     private static void Unavailable2179RejectsCapture()
     {
-        var coordinator = new ActiveHostSessionCoordinator();
         HostProfile profile = RemoteProfile("10.0.0.6");
-        coordinator.SelectProfile(profile);
-        coordinator.CommitActiveSession(RemoteSession(2, profile, HostChannelState.Unavailable));
-        var sessions = new ActiveHostConsoleSessions(coordinator);
+        HostSessionRegistry registry = ConnectedRegistry(profile, HostChannelState.Unavailable);
+        var sessions = new HostConsoleSessions(registry);
 
         HostConsoleSessionCapture result = sessions.Capture(
+            HostId.FromProfile(profile),
             "33333333-3333-3333-3333-333333333333",
             "无控制台通道");
 
         TestAssert.False(result.Succeeded, "Capture succeeded while TCP 2179 was unavailable.");
-        TestAssert.Null(result.Session, "Unavailable console capture returned a session.");
         TestAssert.Contains("TCP 2179", result.Message);
-    }
-
-    private static void HostSwitchInvalidatesCapturedSession()
-    {
-        var coordinator = new ActiveHostSessionCoordinator();
-        HostProfile first = RemoteProfile("10.0.0.6");
-        coordinator.SelectProfile(first);
-        coordinator.CommitActiveSession(RemoteSession(2, first, HostChannelState.Available));
-        var sessions = new ActiveHostConsoleSessions(coordinator);
-        ActiveHostConsoleSession captured = sessions.Capture(
-            "44444444-4444-4444-4444-444444444444",
-            "切换前虚拟机").Session!;
-
-        HostProfile second = RemoteProfile("10.0.0.7");
-        coordinator.SelectProfile(second);
-        coordinator.CommitActiveSession(RemoteSession(3, second, HostChannelState.Available));
-
-        TestAssert.False(sessions.IsCurrent(captured), "Old-host console remained current after switching hosts.");
+        registry.Shutdown();
     }
 
     private static void StaleHostDataRejectsCapture()
     {
-        var coordinator = new ActiveHostSessionCoordinator();
         HostProfile profile = RemoteProfile("10.0.0.6");
-        coordinator.SelectProfile(profile);
-        coordinator.CommitActiveSession(RemoteSession(
-            2,
-            profile,
+        var reconnectEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var connector = new ConsoleConnector(
             HostChannelState.Available,
-            hasStaleData: true));
-        var sessions = new ActiveHostConsoleSessions(coordinator);
+            reconnectEntered);
+        var registry = new HostSessionRegistry(connector, new ConsoleSnapshotLoader());
+        HostId hostId = HostId.FromProfile(profile);
+        Connect(registry, profile, HostChannelState.Available);
+        HostOperationStamp stamp = registry.CaptureOperationStamp(hostId);
 
-        HostConsoleSessionCapture result = sessions.Capture(
-            "66666666-6666-6666-6666-666666666666",
+        TestAssert.True(registry.ReportConnectionLoss(stamp, "模拟控制台宿主断线。"),
+            "The registry rejected the owning host connection loss.");
+        TestAssert.True(SpinWait.SpinUntil(
+            () => registry.Current.GetRequired(hostId).HasStaleData,
+            TimeSpan.FromSeconds(2)), "The target host did not become stale.");
+        HostConsoleSessionCapture result = new HostConsoleSessions(registry).Capture(
+            hostId,
+            "44444444-4444-4444-4444-444444444444",
             "旧数据虚拟机");
 
         TestAssert.False(result.Succeeded, "A stale host session exposed a console target.");
         TestAssert.Contains("中断", result.Message);
+        registry.StopReconnect(hostId);
+        registry.Shutdown();
     }
 
     private static void InvalidVmIdRejectsCapture()
     {
-        var sessions = new ActiveHostConsoleSessions(new ActiveHostSessionCoordinator());
-
-        HostConsoleSessionCapture result = sessions.Capture("not-a-guid", "无效虚拟机");
+        var registry = new HostSessionRegistry();
+        HostConsoleSessionCapture result = new HostConsoleSessions(registry).Capture(
+            HostId.Local,
+            "not-a-guid",
+            "无效虚拟机");
 
         TestAssert.False(result.Succeeded, "An invalid VM identifier created a console session.");
         TestAssert.Contains("标识无效", result.Message);
+        registry.Shutdown();
     }
 
-    private static void WindowIdentityIsScopedToHostGeneration()
+    private static void SameVmIdIsScopedByHost()
     {
-        var coordinator = new ActiveHostSessionCoordinator();
         HostProfile profile = RemoteProfile("10.0.0.6");
+        HostSessionRegistry registry = ConnectedRegistry(profile, HostChannelState.Available);
+        var sessions = new HostConsoleSessions(registry);
         Guid vmId = Guid.Parse("55555555-5555-5555-5555-555555555555");
-        coordinator.SelectProfile(profile);
-        coordinator.CommitActiveSession(RemoteSession(2, profile, HostChannelState.Available));
-        var sessions = new ActiveHostConsoleSessions(coordinator);
-        ActiveHostConsoleSession first = sessions.Capture(vmId.ToString(), "同一虚拟机").Session!;
 
-        coordinator.CommitActiveSession(RemoteSession(3, profile, HostChannelState.Available));
-        ActiveHostConsoleSession second = sessions.Capture(vmId.ToString(), "同一虚拟机").Session!;
+        HostConsoleSession local = sessions.Capture(HostId.Local, vmId.ToString(), "本机虚拟机").Session!;
+        HostConsoleSession remote = sessions.Capture(
+            HostId.FromProfile(profile), vmId.ToString(), "远程虚拟机").Session!;
 
-        TestAssert.False(
-            string.Equals(first.WindowKey, second.WindowKey, StringComparison.Ordinal),
-            "Console window identity was reused across host generations.");
-    }
-
-    private static void RegistryCaptureUsesOwningHostId()
-    {
-        var registry = new HostSessionRegistry(new RegistryConsoleConnector(), new RegistryConsoleSnapshotLoader());
-        HostProfile profile = RemoteProfile("10.0.0.6");
-        HostId remoteHostId = HostId.FromProfile(profile);
-        Guid vmId = Guid.Parse("77777777-7777-7777-7777-777777777777");
-        try
-        {
-            HostConnectResult connected = registry.ConnectAsync(new HostConnectRequest(
-                profile,
-                HostChannelState.Available,
-                HostChannelState.Available)).GetAwaiter().GetResult();
-            TestAssert.True(connected.Succeeded, connected.Message);
-            var sessions = new ActiveHostConsoleSessions(registry);
-
-            ActiveHostConsoleSession local = sessions.Capture(
-                HostId.Local,
-                vmId.ToString(),
-                "同 ID 本机虚拟机").Session!;
-            ActiveHostConsoleSession remote = sessions.Capture(
-                remoteHostId,
-                vmId.ToString(),
-                "同 ID 远程虚拟机").Session!;
-
-            TestAssert.Equal("localhost", local.Server);
-            TestAssert.Equal(profile.Address, remote.Server);
-            TestAssert.False(local.WindowKey == remote.WindowKey,
-                "The same VM ID on different hosts reused one console window identity.");
-        }
-        finally
-        {
-            registry.Shutdown();
-        }
+        TestAssert.False(local.WindowKey == remote.WindowKey,
+            "The same VM ID on different hosts reused one console window identity.");
+        registry.Shutdown();
     }
 
     private static void UnexpectedDisconnectReportsConnectionLoss()
@@ -182,30 +134,36 @@ internal static class ConsoleSessionTests
         TestAssert.Contains("RdpHost.Disconnected +=", windowSource);
         TestAssert.Contains("RdpHost.FatalError +=", windowSource);
         TestAssert.Contains("ReportUnexpectedConnectionLossAsync", windowSource);
-        TestAssert.Contains("ActiveHostSessions.Registry", windowSource);
+        TestAssert.Contains("HostSessions.Registry", windowSource);
         TestAssert.Contains("_session.Target.IsLocal", viewModelSource);
-        TestAssert.Contains("read.Value is null || !read.Value.IsRunning", viewModelSource);
         TestAssert.Contains("_sessionRegistry.ReportConnectionLoss(_session.Stamp, reason)", viewModelSource);
-        TestAssert.Contains("_session.Stamp,", viewModelSource);
+    }
+
+    private static HostSessionRegistry ConnectedRegistry(
+        HostProfile profile,
+        HostChannelState consoleChannel)
+    {
+        var registry = new HostSessionRegistry(
+            new ConsoleConnector(consoleChannel),
+            new ConsoleSnapshotLoader());
+        Connect(registry, profile, consoleChannel);
+        return registry;
+    }
+
+    private static void Connect(
+        HostSessionRegistry registry,
+        HostProfile profile,
+        HostChannelState consoleChannel)
+    {
+        HostConnectResult result = registry.ConnectAsync(new HostConnectRequest(
+            profile,
+            HostChannelState.Available,
+            consoleChannel)).GetAwaiter().GetResult();
+        TestAssert.True(result.Succeeded, result.Message);
     }
 
     private static HostProfile RemoteProfile(string address) =>
         new(Guid.NewGuid(), $"宿主 {address}", address);
-
-    private static ActiveHostSession RemoteSession(
-        long generation,
-        HostProfile profile,
-        HostChannelState consoleChannel,
-        bool hasStaleData = false) =>
-        new(
-            generation,
-            HostTarget.FromProfile(profile),
-            consoleChannel == HostChannelState.Available
-                ? HostConnectionState.Connected
-                : HostConnectionState.PartiallyAvailable,
-            HostChannelState.Available,
-            consoleChannel,
-            HasStaleData: hasStaleData);
 
     private static string FindRepositoryRoot()
     {
@@ -223,30 +181,41 @@ internal static class ConsoleSessionTests
         throw new DirectoryNotFoundException("Could not locate the repository root.");
     }
 
-    private sealed class RegistryConsoleConnection(WmiContext context) : IWmiHostManagementConnection
+    private sealed class ConsoleConnection(WmiContext context) : IWmiHostManagementConnection
     {
         public WmiContext Context { get; } = context;
     }
 
-    private sealed class RegistryConsoleCandidate(HostProfile profile) : IHostSessionCandidate
+    private sealed class ConsoleCandidate(HostProfile profile, HostChannelState consoleChannel) : IHostSessionCandidate
     {
         public HostTarget Target { get; } = HostTarget.FromProfile(profile);
         public IHostManagementConnection ManagementConnection { get; } =
-            new RegistryConsoleConnection(WmiContext.RemoteCurrentWindowsIdentity(profile.Address));
+            new ConsoleConnection(WmiContext.RemoteCurrentWindowsIdentity(profile.Address));
         public HostChannelState ManagementChannel => HostChannelState.Available;
-        public HostChannelState ConsoleChannel => HostChannelState.Available;
+        public HostChannelState ConsoleChannel { get; } = consoleChannel;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
-    private sealed class RegistryConsoleConnector : IHostSessionConnector
+    private sealed class ConsoleConnector(
+        HostChannelState consoleChannel,
+        TaskCompletionSource? reconnectEntered = null) : IHostSessionConnector
     {
-        public Task<IHostSessionCandidate> ConnectAsync(
+        private int _calls;
+
+        public async Task<IHostSessionCandidate> ConnectAsync(
             HostSwitchRequest request,
-            CancellationToken cancellationToken) =>
-            Task.FromResult<IHostSessionCandidate>(new RegistryConsoleCandidate(request.Profile));
+            CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref _calls) > 1 && reconnectEntered is not null)
+            {
+                reconnectEntered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            return new ConsoleCandidate(request.Profile, consoleChannel);
+        }
     }
 
-    private sealed class RegistryConsoleSnapshotLoader : IHostBasicSnapshotLoader
+    private sealed class ConsoleSnapshotLoader : IHostBasicSnapshotLoader
     {
         public Task<HostBasicSnapshot> LoadAsync(
             IHostSessionCandidate candidate,

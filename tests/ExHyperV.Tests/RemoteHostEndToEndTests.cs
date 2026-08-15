@@ -16,15 +16,15 @@ internal static class RemoteHostEndToEndTests
         ("EndToEnd_CurrentIdentityPartialConsoleReconnectFlow", CurrentIdentityPartialConsoleReconnectFlow),
         ("EndToEnd_MultipleProfilesKeepSecretsOutOfConfiguration", MultipleProfilesKeepSecretsOutOfConfiguration),
         ("EndToEnd_PublicRemoteErrorsAreRedacted", PublicRemoteErrorsAreRedacted),
-        ("EndToEnd_InitialSwitchRequestsConsoleRevalidation", InitialSwitchRequestsConsoleRevalidation)
+        ("EndToEnd_InitialConnectRequestsConsoleRevalidation", InitialConnectRequestsConsoleRevalidation)
     ];
 
-    private static void InitialSwitchRequestsConsoleRevalidation()
+    private static void InitialConnectRequestsConsoleRevalidation()
     {
         var profile = new HostProfile(Guid.NewGuid(), "复检宿主", "10.0.0.6");
         var credential = new WindowsCredential("LAB\\Operator", "transient-secret");
 
-        HostSwitchRequest available = HostSwitchRequest.ForConfirmedDiagnostic(
+        HostConnectRequest available = HostConnectRequest.ForConfirmedDiagnostic(
             profile,
             consoleAvailable: true,
             credential);
@@ -32,13 +32,13 @@ internal static class RemoteHostEndToEndTests
         TestAssert.Equal(HostChannelState.Available, available.ManagementChannel);
         TestAssert.Equal(HostChannelState.Available, available.ConsoleChannel);
         TestAssert.Equal(credential, available.TransientCredential);
-        TestAssert.True(available.RevalidateChannels, "Initial switch did not request a fresh TCP 2179 probe.");
+        TestAssert.True(available.RevalidateChannels, "Initial connection did not request a fresh TCP 2179 probe.");
 
-        HostSwitchRequest unavailable = HostSwitchRequest.ForConfirmedDiagnostic(
+        HostConnectRequest unavailable = HostConnectRequest.ForConfirmedDiagnostic(
             profile,
             consoleAvailable: false);
         TestAssert.Equal(HostChannelState.Unavailable, unavailable.ConsoleChannel);
-        TestAssert.True(unavailable.RevalidateChannels, "Partial diagnostic switch did not request channel revalidation.");
+        TestAssert.True(unavailable.RevalidateChannels, "Partial diagnostic connection did not request channel revalidation.");
     }
 
     private static void CurrentIdentityPartialConsoleReconnectFlow()
@@ -80,87 +80,94 @@ internal static class RemoteHostEndToEndTests
             return reconnectCompletion.Task;
         });
         var snapshots = new SequencedSnapshotLoader();
-        var coordinator = new ActiveHostSessionCoordinator(connector, snapshots);
-        coordinator.SelectProfile(profile);
-
-        HostSwitchResult switchResult = coordinator.SwitchToSelectedAsync(new HostSwitchRequest(
+        var registry = new HostSessionRegistry(connector, snapshots);
+        HostId hostId = HostId.FromProfile(profile);
+        HostConnectResult connectResult = registry.ConnectAsync(new HostConnectRequest(
             profile,
             HostChannelState.Available,
             HostChannelState.Unavailable)).GetAwaiter().GetResult();
 
-        TestAssert.True(switchResult.Succeeded, switchResult.Message);
-        TestAssert.Equal(HostConnectionState.PartiallyAvailable, coordinator.Current.ActiveSession.ConnectionState);
-        TestAssert.Equal(profile.Id, coordinator.Current.ActiveSession.Target.ProfileId);
-        TestAssert.Equal(2, coordinator.Current.BasicSnapshot?.VirtualMachineCount);
-        TestAssert.True(coordinator.Current.Capabilities[HostCapabilityKind.VmRead].CanExecute,
+        TestAssert.True(connectResult.Succeeded, connectResult.Message);
+        HostSessionSnapshot connected = registry.Current.GetRequired(hostId);
+        TestAssert.Equal(HostConnectionState.PartiallyAvailable, connected.ConnectionState);
+        TestAssert.Equal(profile.Id, connected.Target.ProfileId);
+        TestAssert.Equal(2, connected.BasicSnapshot?.VirtualMachineCount);
+        TestAssert.True(connected.Capabilities[HostCapabilityKind.VmRead].CanExecute,
             "Partial availability disabled VM reads.");
-        TestAssert.True(coordinator.Current.Capabilities[HostCapabilityKind.VmWrite].CanExecute,
+        TestAssert.True(connected.Capabilities[HostCapabilityKind.VmWrite].CanExecute,
             "Partial availability disabled VM writes.");
-        TestAssert.False(coordinator.Current.Capabilities[HostCapabilityKind.VmConsole].CanExecute,
+        TestAssert.False(connected.Capabilities[HostCapabilityKind.VmConsole].CanExecute,
             "TCP 2179 failure did not disable the console.");
         TestAssert.Contains(
             "TCP 2179",
-            coordinator.Current.Capabilities[HostCapabilityKind.VmConsole].Reason);
+            connected.Capabilities[HostCapabilityKind.VmConsole].Reason);
 
-        var vmOperations = new ActiveHostVmOperations(coordinator, new HostWmiContextResolver());
+        var vmOperations = new HostOperationRouter(registry, new HostWmiContextResolver());
         HostVmReadResult<string> read = vmOperations.ReadAsync(
+            hostId,
             (context, _) => Task.FromResult(context.Host)).GetAwaiter().GetResult();
         TestAssert.Equal(HostVmOperationStatus.Succeeded, read.Status);
         TestAssert.Equal(profile.Address, read.Value);
 
         HostVmWriteResult write = vmOperations.WriteAsync(
+            hostId,
             (_, _) => Task.FromResult(new HostVmBackendWriteResult(true, "虚拟机生命周期操作完成。")))
             .GetAwaiter().GetResult();
         TestAssert.Equal(HostVmOperationStatus.Succeeded, write.Status);
 
-        var consoles = new ActiveHostConsoleSessions(coordinator);
+        var consoles = new HostConsoleSessions(registry);
         HostConsoleSessionCapture blockedConsole = consoles.Capture(
+            hostId,
             "e687df5f-1db0-4653-a7d8-080c00fef57e",
             "测试虚拟机");
         TestAssert.False(blockedConsole.Succeeded, "Console capture succeeded while TCP 2179 was unavailable.");
         TestAssert.Contains("TCP 2179", blockedConsole.Message);
 
-        TestAssert.True(coordinator.UpdateActiveChannels(
-            profile.Id,
+        TestAssert.True(registry.UpdateHostChannels(
+            hostId,
             HostChannelState.Available,
             HostChannelState.Available), "Channel refresh was rejected for the active profile.");
         HostConsoleSessionCapture availableConsole = consoles.Capture(
+            hostId,
             "e687df5f-1db0-4653-a7d8-080c00fef57e",
             "测试虚拟机");
         TestAssert.True(availableConsole.Succeeded, availableConsole.Message);
         TestAssert.Equal(profile.Address, availableConsole.Session?.Server);
         TestAssert.Equal(2179, availableConsole.Session?.Port);
 
-        HostBasicSnapshot oldSnapshot = coordinator.Current.BasicSnapshot!;
-        long oldGeneration = coordinator.Current.ActiveSession.Generation;
-        TestAssert.True(coordinator.ReportConnectionLoss(
-            coordinator.CaptureOperationStamp(),
+        HostBasicSnapshot oldSnapshot = registry.Current.GetRequired(hostId).BasicSnapshot!;
+        long oldGeneration = registry.Current.GetRequired(hostId).Generation;
+        TestAssert.True(registry.ReportConnectionLoss(
+            registry.CaptureOperationStamp(hostId),
             "模拟局域网中断。"), "The active connection loss was not accepted.");
         WaitUntil(() => reconnectEntered.Task.IsCompleted, "Automatic reconnect did not start.");
 
-        TestAssert.True(coordinator.Current.ActiveSession.HasStaleData, "Disconnect did not retain a stale snapshot.");
-        TestAssert.Equal(oldSnapshot, coordinator.Current.BasicSnapshot);
-        TestAssert.Equal(profile.Id, coordinator.Current.ActiveSession.Target.ProfileId);
-        TestAssert.False(coordinator.Current.ActiveSession.Target.IsLocal,
-            "Disconnect silently changed the active host to localhost.");
-        TestAssert.False(coordinator.TryBeginWrite(out IHostWriteLease? staleLease, out string staleReason),
+        HostSessionSnapshot stale = registry.Current.GetRequired(hostId);
+        TestAssert.True(stale.HasStaleData, "Disconnect did not retain a stale snapshot.");
+        TestAssert.Equal(oldSnapshot, stale.BasicSnapshot);
+        TestAssert.Equal(profile.Id, stale.Target.ProfileId);
+        TestAssert.True(registry.Current.TryGet(HostId.Local, out _),
+            "A remote disconnect removed the fixed local host.");
+        TestAssert.False(registry.TryBeginWrite(hostId, out IHostWriteLease? staleLease, out string staleReason),
             "A write lease was granted while remote data was stale.");
         TestAssert.Null(staleLease, "Rejected stale write returned a lease.");
         TestAssert.Contains("旧数据", staleReason);
 
         reconnectCompletion.TrySetResult(new Candidate(profile, HostChannelState.Available));
         WaitUntil(
-            () => coordinator.Current.ActiveSession.Generation > oldGeneration,
+            () => registry.Current.GetRequired(hostId).Generation > oldGeneration,
             "A successful reconnect did not publish a fresh host generation.");
 
-        TestAssert.False(coordinator.Current.ActiveSession.HasStaleData,
+        HostSessionSnapshot recovered = registry.Current.GetRequired(hostId);
+        TestAssert.False(recovered.HasStaleData,
             "A successful reconnect retained the stale-data marker.");
-        TestAssert.Equal(HostConnectionState.Connected, coordinator.Current.ActiveSession.ConnectionState);
-        TestAssert.Equal(7, coordinator.Current.BasicSnapshot?.VirtualMachineCount);
-        TestAssert.True(coordinator.Current.Capabilities[HostCapabilityKind.VmWrite].CanExecute,
+        TestAssert.Equal(HostConnectionState.Connected, recovered.ConnectionState);
+        TestAssert.Equal(7, recovered.BasicSnapshot?.VirtualMachineCount);
+        TestAssert.True(recovered.Capabilities[HostCapabilityKind.VmWrite].CanExecute,
             "VM writes did not recover after reconnect.");
-        TestAssert.True(coordinator.Current.Capabilities[HostCapabilityKind.VmConsole].CanExecute,
+        TestAssert.True(recovered.Capabilities[HostCapabilityKind.VmConsole].CanExecute,
             "Console capability did not recover after reconnect.");
+        registry.Shutdown();
     }
 
     private static void MultipleProfilesKeepSecretsOutOfConfiguration()
@@ -242,44 +249,45 @@ internal static class RemoteHostEndToEndTests
     {
         const string secret = "remote-public-error-secret";
         var profile = new HostProfile(Guid.NewGuid(), "脱敏测试宿主", "10.0.0.9");
-        var failedSwitchCoordinator = new ActiveHostSessionCoordinator(
+        var failedRegistry = new HostSessionRegistry(
             new SequencedConnector((_, _, _) => throw new HostSwitchException($"password={secret}")),
             new SequencedSnapshotLoader());
-        failedSwitchCoordinator.SelectProfile(profile);
-
-        HostSwitchResult failedSwitch = failedSwitchCoordinator.SwitchToSelectedAsync(new HostSwitchRequest(
+        HostConnectResult failedConnect = failedRegistry.ConnectAsync(new HostConnectRequest(
             profile,
             HostChannelState.Available,
             HostChannelState.Available)).GetAwaiter().GetResult();
 
-        AssertRedacted(failedSwitch.Message, secret, "Host switch result");
+        AssertRedacted(failedConnect.Message, secret, "Host connect result");
 
         var reconnectEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var connector = new SequencedConnector((call, _, token) => call == 1
             ? Task.FromResult<IHostSessionCandidate>(new Candidate(profile, HostChannelState.Available))
             : WaitForCancellationAsync(reconnectEntered, token));
-        var coordinator = new ActiveHostSessionCoordinator(connector, new SequencedSnapshotLoader());
-        coordinator.SelectProfile(profile);
-        HostSwitchResult connected = coordinator.SwitchToSelectedAsync(new HostSwitchRequest(
+        var registry = new HostSessionRegistry(connector, new SequencedSnapshotLoader());
+        HostId hostId = HostId.FromProfile(profile);
+        HostConnectResult connected = registry.ConnectAsync(new HostConnectRequest(
             profile,
             HostChannelState.Available,
             HostChannelState.Available)).GetAwaiter().GetResult();
         TestAssert.True(connected.Succeeded, connected.Message);
-        var operations = new ActiveHostVmOperations(coordinator, new HostWmiContextResolver());
+        var operations = new HostOperationRouter(registry, new HostWmiContextResolver());
 
         HostVmWriteResult backendFailure = operations.WriteAsync(
+            hostId,
             (_, _) => Task.FromResult(new HostVmBackendWriteResult(
                 false,
                 $"token={secret}"))).GetAwaiter().GetResult();
         AssertRedacted(backendFailure.Message, secret, "VM backend result");
 
         HostVmReadResult<string> connectionFailure = operations.ReadAsync<string>(
+            hostId,
             (_, _) => throw new TimeoutException($"password={secret}"))
             .GetAwaiter().GetResult();
         WaitUntil(() => reconnectEntered.Task.IsCompleted, "Redaction reconnect did not start.");
         AssertRedacted(connectionFailure.Message, secret, "VM connection error");
-        AssertRedacted(coordinator.Current.Reconnect.LastError, secret, "Reconnect state");
-        coordinator.StopReconnect();
+        AssertRedacted(registry.Current.GetRequired(hostId).Reconnect.LastError, secret, "Reconnect state");
+        registry.StopReconnect(hostId);
+        registry.Shutdown();
     }
 
     private static async Task<IHostSessionCandidate> WaitForCancellationAsync(

@@ -9,19 +9,15 @@ namespace ExHyperV.Views
 {
     public partial class MainWindow : FluentWindow
     {
-        private readonly IActiveHostSessionCoordinator _hostCoordinator = ActiveHostSessions.Current;
-
         public MainWindow()
         {
             InitializeComponent();
             AppLog.BecameUnavailable += OnLoggingBecameUnavailable;
-            _hostCoordinator.StateChanged += OnActiveHostStateChanged;
             Closed += (_, _) =>
             {
                 AppLog.BecameUnavailable -= OnLoggingBecameUnavailable;
-                _hostCoordinator.StateChanged -= OnActiveHostStateChanged;
             };
-            ApplyCapabilities(_hostCoordinator.Current.Capabilities);
+            ApplyCapabilities(HostSessions.Registry.Current.GetRequired(HostId.Local).Capabilities);
             if (App.PerformanceMode)
             {
                 // 无 GPU 模式：关 Mica（省 DWM 合成），改不透明底
@@ -76,9 +72,6 @@ namespace ExHyperV.Views
                 new Action(() => SettingsService.EnableSystemThemeWatch(this)),
                 System.Windows.Threading.DispatcherPriority.Background);
         }
-
-        private void OnActiveHostStateChanged(object? sender, ActiveHostStateChangedEventArgs e) =>
-            Dispatcher.InvokeAsync(() => ApplyCapabilities(e.Current.Capabilities));
 
         private void ApplyCapabilities(HostCapabilityMatrix capabilities)
         {

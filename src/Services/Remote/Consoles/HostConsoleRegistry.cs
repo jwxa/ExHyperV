@@ -13,7 +13,7 @@ public interface IHostConsoleRegistry
     int Count(HostId hostId);
     IReadOnlyList<HostConsoleWindowInfo> GetOpenWindows(HostId hostId);
     bool TryActivate(string windowKey);
-    void Register(ActiveHostConsoleSession session, IHostConsoleWindow window);
+    void Register(HostConsoleSession session, IHostConsoleWindow window);
     bool Unregister(string windowKey, IHostConsoleWindow window);
     HostConsoleCloseResult CloseAll(HostId hostId);
 }
@@ -72,7 +72,7 @@ public sealed class HostConsoleRegistry : IHostConsoleRegistry
         }
     }
 
-    public void Register(ActiveHostConsoleSession session, IHostConsoleWindow window)
+    public void Register(HostConsoleSession session, IHostConsoleWindow window)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(window);
@@ -140,7 +140,7 @@ public sealed class HostConsoleRegistry : IHostConsoleRegistry
         IHostConsoleWindow Window);
 }
 
-public static class ActiveHostConsoleWindows
+public static class HostConsoleWindows
 {
     public static IHostConsoleRegistry Registry { get; } = new HostConsoleRegistry();
 }

@@ -1,0 +1,375 @@
+{
+  "SchemaVersion": "1.0",
+  "Title": "ExHyperV 受控宿主集成验收报告",
+  "StartedAt": "2026-08-15T23:54:06.8100716+08:00",
+  "FinishedAt": "2026-08-15T23:54:31.5707603+08:00",
+  "HostAddress": "10.0.0.6",
+  "HostDisplayName": "Jwxa-HyperVM",
+  "AuthenticationMode": "Windows Credential Manager 显式凭据",
+  "OverallStatus": "部分通过",
+  "Stages": [
+    {
+      "Name": "受控宿主配置保存",
+      "Status": "通过",
+      "DurationMilliseconds": 35,
+      "Message": "已使用产品配置存储保存并重载 1 个受控宿主配置。",
+      "Details": {
+        "配置文件": "D:\\Code\\ExHyperV\\.codex-tasks\\multi-host-management\\tasks\\22-release-convergence\\controlled-host-readonly-final-20260815.hosts.xml",
+        "配置数量": 1,
+        "包含第二宿主": false
+      }
+    },
+    {
+      "Name": "两通道诊断",
+      "Status": "通过",
+      "DurationMilliseconds": 17325,
+      "Message": "WMI/DCOM 与 TCP 2179 均可用。",
+      "Details": {
+        "总体": "FullyAvailable",
+        "WMI/DCOM": "Succeeded",
+        "WMI/DCOM错误码": "None",
+        "TCP2179": "Succeeded",
+        "TCP2179错误码": "None",
+        "详细日志": [
+          {
+            "time": "2026-08-15T23:54:06.8729146+08:00",
+            "level": "Information",
+            "message": "开始检测主机 Jwxa-HyperVM（10.0.0.6）。"
+          },
+          {
+            "time": "2026-08-15T23:54:06.8749767+08:00",
+            "step": "Ipv4Reachability",
+            "level": "Information",
+            "message": "开始检测 IPv4 可达性。"
+          },
+          {
+            "time": "2026-08-15T23:54:21.863318+08:00",
+            "step": "Ipv4Reachability",
+            "level": "Error",
+            "message": "IPv4 主机未响应 ICMP，状态：TimedOut。后续通道检测仍会继续。"
+          },
+          {
+            "time": "2026-08-15T23:54:21.8643362+08:00",
+            "step": "Identity",
+            "level": "Information",
+            "message": "开始解析连接身份。"
+          },
+          {
+            "time": "2026-08-15T23:54:21.8674736+08:00",
+            "step": "Identity",
+            "level": "Information",
+            "message": "开始验证显式凭据；密码不会写入日志。"
+          },
+          {
+            "time": "2026-08-15T23:54:23.8831969+08:00",
+            "step": "Identity",
+            "level": "Warning",
+            "message": "目标主机未开放 SMB 凭据校验通道，无法独立确认密码；将继续由 WMI/DCOM 返回最终结果。"
+          },
+          {
+            "time": "2026-08-15T23:54:23.8833692+08:00",
+            "step": "Identity",
+            "level": "Information",
+            "message": "已解析显式身份 Jwxa，密码不会写入日志。密码预验证无法完成，将由 WMI/DCOM 返回最终结果。"
+          },
+          {
+            "time": "2026-08-15T23:54:23.8833892+08:00",
+            "step": "WmiDcom",
+            "level": "Information",
+            "message": "开始查询 WMI/DCOM 命名空间 root\\virtualization\\v2。"
+          },
+          {
+            "time": "2026-08-15T23:54:24.1859686+08:00",
+            "step": "WmiDcom",
+            "level": "Information",
+            "message": "WMI/DCOM root\\virtualization\\v2 查询成功，管理通道可用。"
+          },
+          {
+            "time": "2026-08-15T23:54:24.1860038+08:00",
+            "step": "Tcp2179",
+            "level": "Information",
+            "message": "开始连接 TCP 10.0.0.6:2179。"
+          },
+          {
+            "time": "2026-08-15T23:54:24.1960629+08:00",
+            "step": "Tcp2179",
+            "level": "Information",
+            "message": "TCP 2179 连接成功，控制台通道可用。"
+          },
+          {
+            "time": "2026-08-15T23:54:24.1962564+08:00",
+            "level": "Information",
+            "message": "检测完成，总体状态：全部可用；管理通道：可用；控制台通道：可用。"
+          }
+        ]
+      }
+    },
+    {
+      "Name": "只读配置预检",
+      "Status": "通过",
+      "DurationMilliseconds": 6661,
+      "Message": "只读预检完成；未修改远程宿主。",
+      "Details": {
+        "计算机名": "JWXA-LAPTOP",
+        "网络数量": 1,
+        "Public网络数量": 0,
+        "已启用本地账户": [
+          {
+            "name": "CodexSandboxOffline",
+            "sid": "S-1-5-21-2873570943-3971914220-3407592031-1005",
+            "administrator": false,
+            "hyperVAdministrator": false,
+            "remoteManagementUser": false
+          },
+          {
+            "name": "CodexSandboxOnline",
+            "sid": "S-1-5-21-2873570943-3971914220-3407592031-1006",
+            "administrator": false,
+            "hyperVAdministrator": false,
+            "remoteManagementUser": false
+          },
+          {
+            "name": "jwxa",
+            "sid": "S-1-5-21-2873570943-3971914220-3407592031-1001",
+            "administrator": true,
+            "hyperVAdministrator": true,
+            "remoteManagementUser": true
+          }
+        ],
+        "可选网络": [
+          {
+            "interfaceIndex": 26,
+            "name": "jin-5g 3",
+            "category": "Private",
+            "cidrs": [
+              "10.0.0.0/24"
+            ]
+          }
+        ],
+        "失败项": 0,
+        "需关注项": 0,
+        "详细日志": [
+          {
+            "time": "2026-08-15T23:54:24.2029853+08:00",
+            "stage": "Connection",
+            "level": "Information",
+            "message": "开始远程配置预检：Jwxa-HyperVM（10.0.0.6）。本阶段只读取状态，不会修改远程主机。"
+          },
+          {
+            "time": "2026-08-15T23:54:24.2036635+08:00",
+            "stage": "Connection",
+            "level": "Information",
+            "message": "使用身份 Jwxa 读取预检信息；密码不会写入日志。"
+          },
+          {
+            "time": "2026-08-15T23:54:24.3713435+08:00",
+            "stage": "HostEnvironment",
+            "level": "Information",
+            "message": "读取工作组或域状态。"
+          },
+          {
+            "time": "2026-08-15T23:54:24.3715852+08:00",
+            "stage": "HostEnvironment",
+            "level": "Information",
+            "message": "计算机 JWXA-LAPTOP 属于工作组 WORKGROUP。"
+          },
+          {
+            "time": "2026-08-15T23:54:24.3716169+08:00",
+            "stage": "LocalAccounts",
+            "level": "Information",
+            "message": "读取已启用的本地账户。"
+          },
+          {
+            "time": "2026-08-15T23:54:24.4724481+08:00",
+            "stage": "LocalAccounts",
+            "level": "Information",
+            "message": "检测到 3 个已启用本地账户。"
+          },
+          {
+            "time": "2026-08-15T23:54:24.4726379+08:00",
+            "stage": "AdministratorsGroup",
+            "level": "Information",
+            "message": "读取 Administrators 成员。"
+          },
+          {
+            "time": "2026-08-15T23:54:24.7028417+08:00",
+            "stage": "AdministratorsGroup",
+            "level": "Information",
+            "message": "Administrators 当前有 2 个成员。"
+          },
+          {
+            "time": "2026-08-15T23:54:24.7028753+08:00",
+            "stage": "HyperVAdministratorsGroup",
+            "level": "Information",
+            "message": "读取 Hyper-V Administrators 成员。"
+          },
+          {
+            "time": "2026-08-15T23:54:24.9775705+08:00",
+            "stage": "HyperVAdministratorsGroup",
+            "level": "Information",
+            "message": "Hyper-V Administrators 当前有 1 个成员。"
+          },
+          {
+            "time": "2026-08-15T23:54:24.9775953+08:00",
+            "stage": "RemoteManagementUsersGroup",
+            "level": "Information",
+            "message": "读取 Remote Management Users 成员。"
+          },
+          {
+            "time": "2026-08-15T23:54:25.1701971+08:00",
+            "stage": "RemoteManagementUsersGroup",
+            "level": "Information",
+            "message": "Remote Management Users 当前有 1 个成员。"
+          },
+          {
+            "time": "2026-08-15T23:54:25.1708931+08:00",
+            "stage": "TokenFilterPolicy",
+            "level": "Information",
+            "message": "读取 LocalAccountTokenFilterPolicy。"
+          },
+          {
+            "time": "2026-08-15T23:54:25.3458015+08:00",
+            "stage": "TokenFilterPolicy",
+            "level": "Information",
+            "message": "LocalAccountTokenFilterPolicy 状态：已设置为 1。"
+          },
+          {
+            "time": "2026-08-15T23:54:25.3458526+08:00",
+            "stage": "Networks",
+            "level": "Information",
+            "message": "读取网络配置文件与 IPv4 地址。"
+          },
+          {
+            "time": "2026-08-15T23:54:25.7070092+08:00",
+            "stage": "Networks",
+            "level": "Information",
+            "message": "jin-5g 3（接口索引 26）：Private，10.0.0.0/24"
+          },
+          {
+            "time": "2026-08-15T23:54:25.7080856+08:00",
+            "stage": "Firewall",
+            "level": "Information",
+            "message": "读取 Windows 内置 WMI/Hyper-V 规则与 ExHyperV TCP 2179 规则。"
+          },
+          {
+            "time": "2026-08-15T23:54:30.859281+08:00",
+            "stage": "Firewall",
+            "level": "Information",
+            "message": "WMI 内置规则：已启用；Hyper-V 内置规则：已启用；ExHyperV TCP 2179：已启用，远程地址=10.0.0.0/255.255.255.0。"
+          },
+          {
+            "time": "2026-08-15T23:54:30.8604881+08:00",
+            "stage": "Connection",
+            "level": "Information",
+            "message": "预检完成：读取失败 0 项，需要关注 0 项；未执行任何修改。"
+          }
+        ]
+      }
+    },
+    {
+      "Name": "连接与基础快照",
+      "Status": "通过",
+      "DurationMilliseconds": 463,
+      "Message": "远程宿主连接成功。",
+      "Details": {
+        "连接状态": "Succeeded",
+        "本机始终存在": true,
+        "远程宿主": "10.0.0.6",
+        "会话代次": 2,
+        "计算机名": "JWXA-LAPTOP",
+        "操作系统": "Microsoft Windows 11 专业版 (10.0.26200)",
+        "虚拟机数量": 1
+      }
+    },
+    {
+      "Name": "两台远程宿主并行",
+      "Status": "跳过",
+      "DurationMilliseconds": 0,
+      "Message": "本机与第一远程宿主已并行；未设置 EXHYPERV_INTEGRATION_SECOND_HOST，第二远程宿主场景由确定性测试覆盖。",
+      "Details": {}
+    },
+    {
+      "Name": "真实远程虚拟机列表",
+      "Status": "通过",
+      "DurationMilliseconds": 223,
+      "Message": "通过指定远程宿主读取到 1 台虚拟机。",
+      "Details": {
+        "操作状态": "Succeeded",
+        "虚拟机数量": 1,
+        "虚拟机": [
+          {
+            "id": "49c6cb7e-1b25-4a0f-9e84-7d0d1013a02e",
+            "name": "Jwxa-HyperVM",
+            "stateCode": 2,
+            "state": "正在运行"
+          }
+        ]
+      }
+    },
+    {
+      "Name": "TCP 2179 不可用时的管理降级",
+      "Status": "跳过",
+      "DurationMilliseconds": 0,
+      "Message": "本次运行 TCP 2179 可用；请在受控场景中临时阻断 2179 后另行记录管理降级证据。",
+      "Details": {}
+    },
+    {
+      "Name": "TCP 2179 控制台捕获",
+      "Status": "通过",
+      "DurationMilliseconds": 2,
+      "Message": "控制台会话绑定到所属宿主、会话代次和 TCP 2179。",
+      "Details": {
+        "服务器": "10.0.0.6",
+        "端口": 2179,
+        "虚拟机ID": "49c6cb7e-1b25-4a0f-9e84-7d0d1013a02e",
+        "仍属当前会话": true
+      }
+    },
+    {
+      "Name": "VM 生命周期写入",
+      "Status": "跳过",
+      "DurationMilliseconds": 0,
+      "Message": "未设置 EXHYPERV_INTEGRATION_VM_WRITE=确认；未执行任何 VM 写入。",
+      "Details": {}
+    },
+    {
+      "Name": "远程宿主配置",
+      "Status": "跳过",
+      "DurationMilliseconds": 0,
+      "Message": "未设置 EXHYPERV_INTEGRATION_CONFIGURE=确认；只保留预检结果。",
+      "Details": {}
+    },
+    {
+      "Name": "回滚复检",
+      "Status": "跳过",
+      "DurationMilliseconds": 0,
+      "Message": "未启用远程配置，因此没有本次运行生成的回滚脚本。",
+      "Details": {}
+    },
+    {
+      "Name": "真实断线与自动重连",
+      "Status": "跳过",
+      "DurationMilliseconds": 0,
+      "Message": "未设置 EXHYPERV_INTEGRATION_DISCONNECT=确认；未要求制造网络中断。",
+      "Details": {}
+    },
+    {
+      "Name": "主动断开第一远程宿主",
+      "Status": "通过",
+      "DurationMilliseconds": 4,
+      "Message": "远程宿主已断开，保存的主机配置仍然保留。",
+      "Details": {
+        "断开状态": "Succeeded",
+        "本机仍保留": true,
+        "目标远程宿主已移除": true
+      }
+    }
+  ],
+  "DangerousSwitches": {
+    "VM 生命周期写入": false,
+    "人工网络中断与自动重连": false,
+    "远程宿主配置": false,
+    "人工执行回滚后的复检": false
+  },
+  "HasFailures": false
+}

@@ -76,12 +76,12 @@ public sealed class WindowsHostSessionConnector(
         {
             WmiConnectionCache.Clear(context);
             _ = ObserveConnectCompletionAsync(connectTask);
-            throw new HostSwitchException("连接 WMI/DCOM 超时，原活动宿主保持不变。", ex);
+            throw new HostSwitchException("连接 WMI/DCOM 超时，现有宿主会话保持不变。", ex);
         }
         catch (Exception ex)
         {
             WmiConnectionCache.Clear(context);
-            throw new HostSwitchException("无法建立 WMI/DCOM 管理会话，原活动宿主保持不变。", ex);
+            throw new HostSwitchException("无法建立 WMI/DCOM 管理会话，现有宿主会话保持不变。", ex);
         }
     }
 

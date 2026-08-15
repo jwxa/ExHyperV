@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<HostProfiles version="1">
+  <Host id="5b986daa-7f60-4767-ba4c-ccea70eff0b2" name="Jwxa-HyperVM" address="10.0.0.6" authentication="ExplicitCredential" userName="Jwxa" credentialTarget="ExHyperV/RemoteHost/5b986daa-7f60-4767-ba4c-ccea70eff0b2" />
+</HostProfiles>

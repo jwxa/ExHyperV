@@ -32,7 +32,7 @@ namespace ExHyperV.Views
         private const double EnhancedResizeBorder = 3;
 
         private readonly ConsoleViewModel _vm;
-        private readonly ActiveHostConsoleSession _session;
+        private readonly HostConsoleSession _session;
         private readonly HostId _hostId;
         private readonly IHostSessionRegistry _sessionRegistry;
         private bool _isFullScreen;               // 供 WM_GETMINMAXINFO 判断最大化铺满显示器还是工作区
@@ -51,15 +51,15 @@ namespace ExHyperV.Views
         private bool _closing;                                    // 用户经连接栏关闭：抑制断开后的自动重连（避免"复活"）
         private bool _topHookAdded;                                // 顶边缩放钩子是否已在 ContentRendered 注册（只挂一次）
 
-        public ConsoleWindow(ActiveHostConsoleSession session)
+        public ConsoleWindow(HostConsoleSession session)
         {
             _session = session ?? throw new ArgumentNullException(nameof(session));
             _hostId = session.Stamp.ProfileId is Guid profileId
                 ? HostId.FromProfileId(profileId)
                 : HostId.Local;
-            _sessionRegistry = ActiveHostSessions.Registry;
+            _sessionRegistry = HostSessions.Registry;
             if (!_sessionRegistry.CanUseConsole(session.Stamp))
-                throw new InvalidOperationException("活动宿主已改变，未打开旧宿主控制台。");
+                throw new InvalidOperationException("所属宿主会话已改变，未打开旧会话控制台。");
 
             _vm = new ConsoleViewModel(session, _sessionRegistry);
             this.DataContext = _vm;
@@ -77,7 +77,7 @@ namespace ExHyperV.Views
                 _vm.Dispose();
                 _rdpTornDown = true;
                 RdpHost.ShutdownAndDispose();
-                throw new InvalidOperationException("活动宿主已改变，未打开旧宿主控制台。");
+                throw new InvalidOperationException("所属宿主会话已改变，未打开旧会话控制台。");
             }
 
             // TitleBar 关闭按钮直调 Window.Close() 绕过 _closing；关闭时 ShutdownAndDispose 的 DoEvents
@@ -303,7 +303,7 @@ namespace ExHyperV.Views
         }
 
         // Hyper-V 控制台连接配方（消费层组装；增强沿用当前分辨率作初始尺寸，避免切换跳变）。
-        private static RdpConnectionSettings BuildHyperVSettings(ActiveHostConsoleSession session, bool enhanced, int reuseWidth, int reuseHeight, uint desktopScale)
+        private static RdpConnectionSettings BuildHyperVSettings(HostConsoleSession session, bool enhanced, int reuseWidth, int reuseHeight, uint desktopScale)
         {
             var id = session.VmId.ToString("D").ToUpperInvariant();
             return new RdpConnectionSettings

@@ -14,7 +14,7 @@ internal static class HostConsoleRegistryTests
     private static void TracksByHostAndVmAndActivatesExisting()
     {
         var registry = new HostConsoleRegistry();
-        ActiveHostConsoleSession session = Session(ProfileA, VmA1, generation: 2);
+        HostConsoleSession session = Session(ProfileA, VmA1, generation: 2);
         var window = new FakeConsoleWindow();
 
         registry.Register(session, window);
@@ -30,7 +30,7 @@ internal static class HostConsoleRegistryTests
     private static void UnregisterRequiresMatchingWindow()
     {
         var registry = new HostConsoleRegistry();
-        ActiveHostConsoleSession session = Session(ProfileA, VmA1, generation: 2);
+        HostConsoleSession session = Session(ProfileA, VmA1, generation: 2);
         var registered = new FakeConsoleWindow();
         registry.Register(session, registered);
 
@@ -46,9 +46,9 @@ internal static class HostConsoleRegistryTests
     private static void CloseAllTargetsOnlyOneHost()
     {
         var registry = new HostConsoleRegistry();
-        ActiveHostConsoleSession sessionA1 = Session(ProfileA, VmA1, generation: 2);
-        ActiveHostConsoleSession sessionA2 = Session(ProfileA, VmA2, generation: 2);
-        ActiveHostConsoleSession sessionB = Session(ProfileB, VmA1, generation: 3);
+        HostConsoleSession sessionA1 = Session(ProfileA, VmA1, generation: 2);
+        HostConsoleSession sessionA2 = Session(ProfileA, VmA2, generation: 2);
+        HostConsoleSession sessionB = Session(ProfileB, VmA1, generation: 3);
         var windowA1 = new FakeConsoleWindow();
         var windowA2 = new FakeConsoleWindow();
         var windowB = new FakeConsoleWindow();
@@ -68,16 +68,16 @@ internal static class HostConsoleRegistryTests
         TestAssert.Equal(1, registry.Count(sessionB.HostId));
     }
 
-    private static ActiveHostConsoleSession Session(HostProfile profile, Guid vmId, long generation)
+    private static HostConsoleSession Session(HostProfile profile, Guid vmId, long generation)
     {
         HostTarget target = HostTarget.FromProfile(profile);
-        return new ActiveHostConsoleSession(
+        return new HostConsoleSession(
             target,
             new HostOperationStamp(generation, profile.Id),
             vmId,
             $"VM {vmId:N}",
             profile.Address,
-            ActiveHostConsoleSessions.ConsolePort,
+            HostConsoleSessions.ConsolePort,
             $"{generation}:{profile.Id:N}:{vmId:N}");
     }
 

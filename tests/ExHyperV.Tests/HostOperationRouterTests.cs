@@ -11,6 +11,7 @@ internal static class HostOperationRouterTests
         ("HostRouter_ReadsUseExplicitLocalOrRemoteHostId", ReadsUseExplicitLocalOrRemoteHostId),
         ("HostRouter_WritesAndStaleResultsAreScopedToTargetHost", WritesAndStaleResultsAreScopedToTargetHost),
         ("HostRouter_TwoRemoteHostsKeepWritesAndGenerationsIndependent", TwoRemoteHostsKeepWritesAndGenerationsIndependent),
+        ("HostRouter_ClassifiesWriteFailuresBeforeReconnect", ClassifiesWriteFailuresBeforeReconnect),
         ("HostRouter_SessionReconnectAndVmLogsUseOwningHost", SessionReconnectAndVmLogsUseOwningHost)
     ];
 
@@ -244,7 +245,7 @@ internal static class HostOperationRouterTests
                 "The current host did not accept its connection-loss report.");
 
             IReadOnlyList<AppLogEntry> entries = AppLog.Feed.GetSnapshot(hostId);
-            foreach (string source in new[] { "宿主切换", "虚拟机操作", "自动重连" })
+            foreach (string source in new[] { "宿主会话", "虚拟机操作", "自动重连" })
             {
                 TestAssert.True(
                     entries.Any(entry => entry.Source == source),
@@ -258,6 +259,56 @@ internal static class HostOperationRouterTests
         {
             registry.Shutdown();
             AppLog.Shutdown();
+        }
+    }
+
+    private static void ClassifiesWriteFailuresBeforeReconnect()
+    {
+        var registry = new HostSessionRegistry(
+            new RouterConnector(),
+            new RouterSnapshotLoader(),
+            new BlockingReconnectScheduler());
+        IHostOperationRouter router = new HostOperationRouter(registry, new HostWmiContextResolver());
+        var profile = new HostProfile(
+            Guid.Parse("99999999-9999-9999-9999-999999999994"),
+            "错误分类宿主",
+            "10.0.0.24");
+        HostId hostId = HostId.FromProfile(profile);
+
+        try
+        {
+            TestAssert.True(registry.ConnectAsync(new HostConnectRequest(
+                profile,
+                HostChannelState.Available,
+                HostChannelState.Available)).GetAwaiter().GetResult().Succeeded,
+                "The classification host did not connect.");
+
+            ApiResponse businessFailure = ApiResponse.Fail("access denied", 5, ApiErrorSource.Wmi);
+            HostVmWriteResult businessResult = router.WriteAsync(
+                hostId,
+                (_, _) => Task.FromResult(HostVmBackendWriteResult.Failure(businessFailure)))
+                .GetAwaiter().GetResult();
+            TestAssert.Equal(HostVmOperationStatus.Failed, businessResult.Status);
+            TestAssert.Contains("access denied", businessResult.Message);
+            TestAssert.False(registry.Current.GetRequired(hostId).HasStaleData,
+                "A business failure incorrectly marked the remote host stale.");
+
+            ApiResponse transportFailure = ApiResponse.Fail(
+                "RPC transport failed",
+                (int)System.Management.ManagementStatus.TransportFailure,
+                ApiErrorSource.Wmi);
+            HostVmWriteResult transportResult = router.WriteAsync(
+                hostId,
+                (_, _) => Task.FromResult(HostVmBackendWriteResult.Failure(transportFailure)))
+                .GetAwaiter().GetResult();
+            TestAssert.Equal(HostVmOperationStatus.Failed, transportResult.Status);
+            TestAssert.True(registry.Current.GetRequired(hostId).HasStaleData,
+                "A WMI transport failure did not mark the owning host stale.");
+        }
+        finally
+        {
+            registry.StopReconnect(hostId);
+            registry.Shutdown();
         }
     }
 

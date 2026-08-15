@@ -52,7 +52,7 @@ public partial class HostConnectionPage
             diagnosticPipeline);
         return new HostConnectionPageViewModel(
             new HostProfileManager(new HostProfileStore(), credentialStore),
-            ActiveHostSessions.Registry,
+            HostSessions.Registry,
             diagnosticPipeline,
             preflightPipeline,
             configurationPipeline,
@@ -128,9 +128,9 @@ public partial class HostConnectionPage
             HostStripGrid.ColumnDefinitions[0].Width = new System.Windows.GridLength(1, System.Windows.GridUnitType.Star);
             HostStripGrid.ColumnDefinitions[1].Width = new System.Windows.GridLength(0);
             HostStripGrid.ColumnDefinitions[2].Width = System.Windows.GridLength.Auto;
-            System.Windows.Controls.Grid.SetRow(ActiveHostPanel, 0);
-            System.Windows.Controls.Grid.SetColumn(ActiveHostPanel, 0);
-            System.Windows.Controls.Grid.SetColumnSpan(ActiveHostPanel, 2);
+            System.Windows.Controls.Grid.SetRow(SelectedHostPanel, 0);
+            System.Windows.Controls.Grid.SetColumn(SelectedHostPanel, 0);
+            System.Windows.Controls.Grid.SetColumnSpan(SelectedHostPanel, 2);
             System.Windows.Controls.Grid.SetRow(HostList, 1);
             System.Windows.Controls.Grid.SetColumn(HostList, 0);
             System.Windows.Controls.Grid.SetColumnSpan(HostList, 3);
@@ -205,9 +205,9 @@ public partial class HostConnectionPage
         HostStripGrid.ColumnDefinitions[0].Width = new System.Windows.GridLength(172);
         HostStripGrid.ColumnDefinitions[1].Width = new System.Windows.GridLength(1, System.Windows.GridUnitType.Star);
         HostStripGrid.ColumnDefinitions[2].Width = System.Windows.GridLength.Auto;
-        System.Windows.Controls.Grid.SetRow(ActiveHostPanel, 0);
-        System.Windows.Controls.Grid.SetColumn(ActiveHostPanel, 0);
-        System.Windows.Controls.Grid.SetColumnSpan(ActiveHostPanel, 1);
+        System.Windows.Controls.Grid.SetRow(SelectedHostPanel, 0);
+        System.Windows.Controls.Grid.SetColumn(SelectedHostPanel, 0);
+        System.Windows.Controls.Grid.SetColumnSpan(SelectedHostPanel, 1);
         System.Windows.Controls.Grid.SetRow(HostList, 0);
         System.Windows.Controls.Grid.SetColumn(HostList, 1);
         System.Windows.Controls.Grid.SetColumnSpan(HostList, 1);

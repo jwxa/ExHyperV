@@ -1,21 +1,12 @@
 namespace ExHyperV.Services.Remote.Sessions;
 
-public static class ActiveHostSessions
+public static class HostSessions
 {
     private static readonly object Sync = new();
-    private static IActiveHostSessionCoordinator _current = new ActiveHostSessionCoordinator();
-    private static HostSessionRegistry _registry = new();
+    private static IHostSessionRegistry _registry = new HostSessionRegistry();
     private static bool _configured;
 
-    public static IActiveHostSessionCoordinator Current
-    {
-        get
-        {
-            lock (Sync) return _current;
-        }
-    }
-
-    public static HostSessionRegistry Registry
+    public static IHostSessionRegistry Registry
     {
         get
         {
@@ -31,8 +22,7 @@ public static class ActiveHostSessions
         ArgumentNullException.ThrowIfNull(snapshotLoader);
         lock (Sync)
         {
-            if (_configured) throw new InvalidOperationException("活动宿主会话已配置。" );
-            _current = new ActiveHostSessionCoordinator(connector, snapshotLoader);
+            if (_configured) throw new InvalidOperationException("宿主会话注册表已配置。");
             _registry = new HostSessionRegistry(connector, snapshotLoader);
             _configured = true;
         }

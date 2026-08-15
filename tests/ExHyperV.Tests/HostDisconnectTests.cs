@@ -145,7 +145,7 @@ internal static class HostDisconnectTests
         fixture.ConnectBoth();
         var consoles = new HostConsoleRegistry();
         var window = new FakeConsoleWindow();
-        ActiveHostConsoleSession session = ConsoleSession(fixture.ProfileA, VmA1);
+        HostConsoleSession session = ConsoleSession(fixture.ProfileA, VmA1);
         consoles.Register(session, window);
         var workflow = new HostDisconnectCoordinator(fixture.Registry, consoles);
 
@@ -260,13 +260,13 @@ internal static class HostDisconnectTests
         lease!.Dispose();
     }
 
-    private static ActiveHostConsoleSession ConsoleSession(HostProfile profile, Guid vmId) => new(
+    private static HostConsoleSession ConsoleSession(HostProfile profile, Guid vmId) => new(
         HostTarget.FromProfile(profile),
         new HostOperationStamp(2, profile.Id),
         vmId,
         $"VM {vmId:N}",
         profile.Address,
-        ActiveHostConsoleSessions.ConsolePort,
+        HostConsoleSessions.ConsolePort,
         $"2:{profile.Id:N}:{vmId:N}");
 
     private static readonly Guid VmA1 = Guid.Parse("11111111-1111-1111-1111-111111111111");

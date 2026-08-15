@@ -239,7 +239,8 @@
                             </Image>
 
                             <!-- 2. 实时监视器 (运行时显示) -->
-                            <Border Background="#0B0B0B" CornerRadius="6" ClipToBounds="True"
+                            <Border Background="{ui:ThemeResource ControlFillColorSecondaryBrush}"
+                                    CornerRadius="6" ClipToBounds="True"
                             ToolTip="{x:Static properties:Resources.Label_DoubleClickConnect}">
                                 <Border.Style>
                                     <Style TargetType="Border">

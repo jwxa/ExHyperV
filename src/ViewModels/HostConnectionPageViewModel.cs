@@ -72,7 +72,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         _sessionRegistry = sessionRegistry ?? throw new ArgumentNullException(nameof(sessionRegistry));
         _disconnectCoordinator = new HostDisconnectCoordinator(
             _sessionRegistry,
-            consoleRegistry ?? ActiveHostConsoleWindows.Registry);
+            consoleRegistry ?? HostConsoleWindows.Registry);
         _diagnosticPipeline = diagnosticPipeline;
         _configurationPipeline = configurationPipeline;
         _supportArtifactLocator = supportArtifactLocator ?? throw new ArgumentNullException(nameof(supportArtifactLocator));
@@ -80,7 +80,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         Logs = new HostLogViewModel(logFeed ?? AppLog.Feed);
         _sessionRegistry.Changed += OnRegistryChanged;
         RefreshProfiles();
-        UpdateActiveHostProperties();
+        UpdateSelectedHostProperties();
     }
 
     public bool IsRemoteSelected => SelectedHost?.Profile is not null;
@@ -151,11 +151,11 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         : SelectedHost?.Profile?.AuthenticationMode == HostAuthenticationMode.ExplicitCredential
             ? "仅本次会话"
             : "无需单独保存";
-    public string ActiveHostName => SelectedSession?.Target.DisplayName ?? SelectedDisplayName;
-    public string ActiveHostAddress => SelectedSession?.Target.IsLocal == true
+    public string SelectedHostName => SelectedSession?.Target.DisplayName ?? SelectedDisplayName;
+    public string SelectedHostAddress => SelectedSession?.Target.IsLocal == true
         ? Environment.MachineName
         : SelectedSession?.Target.Address ?? SelectedAddress;
-    public string ActiveHostStatus => SelectedSession is not { } session
+    public string SelectedHostStatus => SelectedSession is not { } session
         ? "未连接"
         : session.Target.IsLocal
             ? "本机已连接"
@@ -168,21 +168,21 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
             HostConnectionState.Failed => "远程连接失败",
             _ => "远程状态未知"
         };
-    public MediaBrush ActiveHostStatusBrush => SelectedSession?.ConnectionState switch
+    public MediaBrush SelectedHostStatusBrush => SelectedSession?.ConnectionState switch
     {
         HostConnectionState.Connected or HostConnectionState.LocalConnected => UiStatusBrushes.Success,
         HostConnectionState.PartiallyAvailable or HostConnectionState.Reconnecting => UiStatusBrushes.Caution,
         HostConnectionState.RemoteDisconnected or HostConnectionState.Failed => UiStatusBrushes.Critical,
         _ => UiStatusBrushes.Neutral
     };
-    public string ActiveHostIdentity => (SelectedSession?.Target.AuthenticationMode
+    public string SelectedHostIdentity => (SelectedSession?.Target.AuthenticationMode
         ?? SelectedHost?.Profile?.AuthenticationMode) switch
     {
         HostAuthenticationMode.ExplicitCredential =>
             SelectedSession?.Target.UserName ?? SelectedHost?.Profile?.UserName ?? "显式凭据",
         _ => "当前 Windows 身份"
     };
-    public string ActiveHostSnapshot
+    public string SelectedHostSnapshot
     {
         get
         {
@@ -601,7 +601,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         finally
         {
             IsSwitching = false;
-            UpdateActiveHostProperties();
+            UpdateSelectedHostProperties();
         }
     }
 
@@ -637,7 +637,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         {
             _isDisconnecting = false;
             IsSwitching = false;
-            UpdateActiveHostProperties();
+            UpdateSelectedHostProperties();
         }
     }
 
@@ -754,17 +754,17 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
 
     private void OnRegistryChanged(object? sender, HostRegistryChangedEventArgs e)
     {
-        System.Windows.Application.Current?.Dispatcher.InvokeAsync(UpdateActiveHostProperties);
+        System.Windows.Application.Current?.Dispatcher.InvokeAsync(UpdateSelectedHostProperties);
     }
 
-    private void UpdateActiveHostProperties()
+    private void UpdateSelectedHostProperties()
     {
-        OnPropertyChanged(nameof(ActiveHostName));
-        OnPropertyChanged(nameof(ActiveHostAddress));
-        OnPropertyChanged(nameof(ActiveHostStatus));
-        OnPropertyChanged(nameof(ActiveHostStatusBrush));
-        OnPropertyChanged(nameof(ActiveHostIdentity));
-        OnPropertyChanged(nameof(ActiveHostSnapshot));
+        OnPropertyChanged(nameof(SelectedHostName));
+        OnPropertyChanged(nameof(SelectedHostAddress));
+        OnPropertyChanged(nameof(SelectedHostStatus));
+        OnPropertyChanged(nameof(SelectedHostStatusBrush));
+        OnPropertyChanged(nameof(SelectedHostIdentity));
+        OnPropertyChanged(nameof(SelectedHostSnapshot));
         OnPropertyChanged(nameof(IsReconnectVisible));
         OnPropertyChanged(nameof(IsReconnectActive));
         OnPropertyChanged(nameof(ReconnectSummary));
@@ -782,7 +782,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         DeleteSelectedHostCommand.NotifyCanExecuteChanged();
         DiagnoseSelectedHostCommand.NotifyCanExecuteChanged();
         NotifyRepairStateChanged();
-        NotifyConnectionEligibilityChanged();
+        UpdateSelectedHostProperties();
     }
 
     private HostRepairDecision CurrentRepairDecision => SelectedHost?.Profile is { } profile

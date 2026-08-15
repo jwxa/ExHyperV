@@ -69,8 +69,15 @@ internal static class IntegrationRunnerTests
             HostChannelState.Available,
             HostChannelState.Unavailable,
             HasStaleData: false);
-        var snapshot = new ActiveHostCoordinatorSnapshot(session, profile);
-        var rejected = HostConsoleSessionCapture.Failure("活动宿主的 TCP 2179 控制台通道不可用。");
+        HostSessionSnapshot snapshot = Snapshot(
+            profile,
+            generation: 3,
+            stale: false,
+            DateTimeOffset.MinValue,
+            HostReconnectState.None,
+            consoleChannel: HostChannelState.Unavailable,
+            connectionState: HostConnectionState.PartiallyAvailable);
+        var rejected = HostConsoleSessionCapture.Failure("目标宿主的 TCP 2179 控制台通道不可用。");
 
         PartialAvailabilityEvidence complete = PartialAvailabilityAcceptance.Evaluate(
             snapshot,
@@ -85,7 +92,7 @@ internal static class IntegrationRunnerTests
             rejected);
         TestAssert.False(missingRead.IsComplete, "Capability state replaced proof of a real WMI VM read.");
 
-        var accepted = HostConsoleSessionCapture.Success(new ActiveHostConsoleSession(
+        var accepted = HostConsoleSessionCapture.Success(new HostConsoleSession(
             HostTarget.FromProfile(profile),
             new HostOperationStamp(3, profile.Id),
             Guid.NewGuid(),
@@ -134,7 +141,7 @@ internal static class IntegrationRunnerTests
         observer.Observe(
             Snapshot(profile, 4, stale: true, startedAt, HostReconnectState.Starting("RPC 中断")),
             startedAt.AddSeconds(1));
-        observer.RecordWriteGate(blocked: true, "活动宿主连接已中断，当前显示的是旧数据。");
+        observer.RecordWriteGate(blocked: true, "目标宿主连接已中断，当前显示的是旧数据。");
         observer.Observe(
             Snapshot(profile, 4, stale: true, startedAt,
                 HostReconnectState.Waiting(1, startedAt.AddSeconds(4), "第一次失败")),
@@ -159,7 +166,7 @@ internal static class IntegrationRunnerTests
 
         var localFallback = new DisconnectAcceptanceObserver(profileId, 4, startedAt);
         localFallback.Observe(
-            new ActiveHostCoordinatorSnapshot(ActiveHostSession.CreateLocal(5), null),
+            HostSessionSnapshot.CreateLocal() with { Generation = 5 },
             startedAt.AddSeconds(1));
         TestAssert.False(localFallback.Capture().StayedOnExpectedRemoteHost,
             "A silent fallback to localhost was accepted.");
@@ -502,26 +509,34 @@ internal static class IntegrationRunnerTests
         AuthenticationMode = "当前 Windows 身份"
     };
 
-    private static ActiveHostCoordinatorSnapshot Snapshot(
+    private static HostSessionSnapshot Snapshot(
         HostProfile profile,
         long generation,
         bool stale,
         DateTimeOffset refreshedAt,
-        HostReconnectState reconnect)
+        HostReconnectState reconnect,
+        HostChannelState consoleChannel = HostChannelState.Available,
+        HostConnectionState? connectionState = null)
     {
         var session = new ActiveHostSession(
             generation,
             HostTarget.FromProfile(profile),
-            stale ? HostConnectionState.Reconnecting : HostConnectionState.Connected,
+            connectionState ?? (stale ? HostConnectionState.Reconnecting : HostConnectionState.Connected),
             HostChannelState.Available,
-            HostChannelState.Available,
+            consoleChannel,
             stale);
-        return new ActiveHostCoordinatorSnapshot(
-            session,
-            profile,
-            new HostBasicSnapshot("LAB-HV-06", "Windows", "Running", 2, refreshedAt))
+        return new HostSessionSnapshot(
+            HostId.FromProfile(profile),
+            generation,
+            session.Target,
+            session.ConnectionState,
+            session.ManagementChannel,
+            session.ConsoleChannel,
+            session.HasStaleData)
         {
-            Reconnect = reconnect
+            Reconnect = reconnect,
+            BasicSnapshot = new HostBasicSnapshot("LAB-HV-06", "Windows", "Running", 2, refreshedAt),
+            Capabilities = HostCapabilityMatrix.Create(session, isSwitching: false)
         };
     }
 

@@ -32,11 +32,11 @@ namespace ExHyperV.ViewModels
             => Notifications.ShowRestartPrompt(message);
 
         protected static bool HasHostCapability(HostCapabilityKind kind) =>
-            ActiveHostSessions.Current.Current.Capabilities[kind].CanExecute;
+            LocalCapabilities[kind].CanExecute;
 
         protected bool EnsureHostCapability(HostCapabilityKind kind)
         {
-            HostCapability capability = ActiveHostSessions.Current.Current.Capabilities[kind];
+            HostCapability capability = LocalCapabilities[kind];
             if (capability.CanExecute) return true;
             ShowTip(capability.Reason);
             return false;
@@ -48,11 +48,14 @@ namespace ExHyperV.ViewModels
         {
             lease = null;
             if (!EnsureHostCapability(requiredCapability)) return false;
-            if (ActiveHostSessions.Current.TryBeginWrite(out lease, out string reason)) return true;
+            if (HostSessions.Registry.TryBeginWrite(HostId.Local, out lease, out string reason)) return true;
 
             ShowTip(reason);
             return false;
         }
+
+        private static HostCapabilityMatrix LocalCapabilities =>
+            HostSessions.Registry.Current.GetRequired(HostId.Local).Capabilities;
 
         // ===== 程序性赋值抑制 =====
         // 加载/失败回弹时会以代码给绑定属性赋值，这会触发 OnXxxChanged / PropertyChanged 处理器；

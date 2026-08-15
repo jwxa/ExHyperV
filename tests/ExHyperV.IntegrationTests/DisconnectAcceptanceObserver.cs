@@ -30,7 +30,7 @@ internal sealed record DisconnectAcceptanceEvidence(
         var missing = new List<string>();
         if (!StaleDataObserved) missing.Add("未观察到旧数据状态");
         if (!WriteBlockedWhileStale) missing.Add("未证明旧数据期间写入被拒绝");
-        if (!StayedOnExpectedRemoteHost) missing.Add("断线期间活动宿主发生变化或切回本机");
+        if (!StayedOnExpectedRemoteHost) missing.Add("断线期间目标远程宿主从注册表消失");
         if (!BackoffGrowthObserved) missing.Add("未观察到至少两级递增重连退避");
         if (!BackoffCapRespected) missing.Add("观察到超过 30 秒上限的重连退避");
         if (!FreshGenerationObserved) missing.Add("未观察到新的远程会话代次");
@@ -58,16 +58,15 @@ internal sealed class DisconnectAcceptanceObserver(
     private bool _snapshotRefreshed;
     private bool _capabilitiesRefreshed;
 
-    public void Observe(ActiveHostCoordinatorSnapshot snapshot, DateTimeOffset observedAt)
+    public void Observe(HostSessionSnapshot snapshot, DateTimeOffset observedAt)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         lock (_sync)
         {
-            ActiveHostSession session = snapshot.ActiveSession;
-            if (session.Target.IsLocal || session.Target.ProfileId != expectedProfileId)
+            if (snapshot.Target.IsLocal || snapshot.Target.ProfileId != expectedProfileId)
                 _stayedOnExpectedRemoteHost = false;
 
-            if (session.HasStaleData)
+            if (snapshot.HasStaleData)
                 _staleDataObserved = true;
 
             _maximumReconnectAttempt = Math.Max(_maximumReconnectAttempt, snapshot.Reconnect.Attempt);
@@ -77,9 +76,9 @@ internal sealed class DisconnectAcceptanceObserver(
                 _scheduledDelays.TryAdd(snapshot.Reconnect.Attempt, remaining);
             }
 
-            if (!session.HasStaleData
-                && session.Generation > originalGeneration
-                && session.Target.ProfileId == expectedProfileId)
+            if (!snapshot.HasStaleData
+                && snapshot.Generation > originalGeneration
+                && snapshot.Target.ProfileId == expectedProfileId)
             {
                 _freshGenerationObserved = true;
                 _snapshotRefreshed = snapshot.BasicSnapshot?.RefreshedAt > originalSnapshotRefreshedAt;
@@ -124,17 +123,16 @@ internal sealed class DisconnectAcceptanceObserver(
         }
     }
 
-    private static bool CapabilitiesMatchRecoveredSession(ActiveHostCoordinatorSnapshot snapshot)
+    private static bool CapabilitiesMatchRecoveredSession(HostSessionSnapshot snapshot)
     {
-        ActiveHostSession session = snapshot.ActiveSession;
         HostCapability read = snapshot.Capabilities[HostCapabilityKind.VmRead];
         HostCapability write = snapshot.Capabilities[HostCapabilityKind.VmWrite];
         HostCapability console = snapshot.Capabilities[HostCapabilityKind.VmConsole];
-        bool consoleMatches = session.ConsoleChannel == HostChannelState.Available
+        bool consoleMatches = snapshot.ConsoleChannel == HostChannelState.Available
             ? console.CanExecute
             : !console.CanExecute
               && console.ReasonCode == HostCapabilityReasonCode.ConsoleChannelUnavailable;
-        return session.ManagementChannel == HostChannelState.Available
+        return snapshot.ManagementChannel == HostChannelState.Available
                && read.CanExecute
                && write.CanExecute
                && consoleMatches;

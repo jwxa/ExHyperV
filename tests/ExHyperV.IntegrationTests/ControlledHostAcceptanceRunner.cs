@@ -40,8 +40,8 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
     private HostIdentityResolver _identityResolver = null!;
     private HostDiagnosticPipeline _diagnosticPipeline = null!;
     private HostPreflightPipeline _preflightPipeline = null!;
-    private ActiveHostSessionCoordinator? _coordinator;
-    private ActiveHostVmOperations? _vmOperations;
+    private HostSessionRegistry? _sessionRegistry;
+    private HostOperationRouter? _vmOperations;
     private List<VmInstance> _virtualMachines = [];
     private bool _vmReadSucceeded;
 
@@ -60,11 +60,12 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
 
             if (diagnostic.ManagementAvailable)
             {
-                await ActivateHostAsync(diagnostic, cancellationToken);
-                if (_coordinator?.Current.ActiveSession.Target.ProfileId == _profile.Id)
+                await ConnectPrimaryHostAsync(diagnostic, cancellationToken);
+                HostId primaryHostId = HostId.FromProfile(_profile);
+                if (_sessionRegistry?.Current.TryGet(primaryHostId, out _) == true)
                 {
-                    bool primaryRestored = await RunTwoHostSwitchAsync(diagnostic, cancellationToken);
-                    if (primaryRestored)
+                    bool primaryRemained = await RunTwoHostCoexistenceAsync(cancellationToken);
+                    if (primaryRemained)
                     {
                         await QueryVirtualMachinesAsync(cancellationToken);
                         VerifyPartialAvailability(diagnostic);
@@ -72,17 +73,18 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
                         await RunVmWriteAsync(cancellationToken);
                         await RunConfigurationAndRollbackAsync(preflight, cancellationToken);
                         await RunDisconnectAndReconnectAsync(cancellationToken);
+                        DisconnectPrimaryHost();
                     }
                     else
                     {
-                        AddCoreSkips("两台受控宿主切换后未能恢复第一宿主，停止依赖第一宿主的后续验收。 ");
+                        AddCoreSkips("两台远程宿主并行验收后第一宿主不再可用，停止依赖第一宿主的后续验收。 ");
                     }
                 }
             }
             else
             {
                 _report.Add(
-                    "原子激活与基础快照",
+                    "连接与基础快照",
                     AcceptanceStatus.Skipped,
                     TimeSpan.Zero,
                     "WMI/DCOM 管理通道不可用，未建立候选会话。 ");
@@ -107,7 +109,7 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
         }
         finally
         {
-            await ReturnToLocalAsync();
+            CleanupRemoteSessions();
             WmiApi.ClearConnectionCache();
         }
 
@@ -212,14 +214,16 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
             profile,
             transientCredential: _transientCredential,
             cancellationToken);
-        bool allRequiredChannels = diagnostic.ManagementAvailable && diagnostic.ConsoleAvailable;
+        bool managementReady = diagnostic.ManagementAvailable;
         _report.Add(
             stageName,
-            allRequiredChannels ? AcceptanceStatus.Passed : AcceptanceStatus.Failed,
+            managementReady ? AcceptanceStatus.Passed : AcceptanceStatus.Failed,
             stopwatch.Elapsed,
-            allRequiredChannels
-                ? "WMI/DCOM 与 TCP 2179 均可用。 "
-                : "受控宿主未同时满足 WMI/DCOM 与 TCP 2179 验收条件。 ",
+            managementReady
+                ? diagnostic.ConsoleAvailable
+                    ? "WMI/DCOM 与 TCP 2179 均可用。 "
+                    : "WMI/DCOM 可用；TCP 2179 不可用，已记录为受支持的管理可用/控制台不可用降级。 "
+                : "受控宿主的 WMI/DCOM 管理通道不可用。 ",
             new Dictionary<string, object?>
             {
                 ["总体"] = diagnostic.Availability.ToString(),
@@ -292,7 +296,7 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
         return preflight;
     }
 
-    private async Task ActivateHostAsync(
+    private async Task ConnectPrimaryHostAsync(
         HostDiagnosticReport diagnostic,
         CancellationToken cancellationToken)
     {
@@ -301,46 +305,51 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
             _identityResolver,
             _options.OperationTimeout,
             new WindowsTcpPortProbe(_options.OperationTimeout));
-        _coordinator = new ActiveHostSessionCoordinator(
-            connector,
-            new WindowsHostBasicSnapshotLoader());
-        _vmOperations = new ActiveHostVmOperations(_coordinator, new HostWmiContextResolver());
-        _coordinator.SelectProfile(_profile);
-        HostSwitchResult result = await _coordinator.SwitchToSelectedAsync(
-            HostSwitchRequest.ForConfirmedDiagnostic(
+        _sessionRegistry = new HostSessionRegistry(connector, new WindowsHostBasicSnapshotLoader());
+        _vmOperations = new HostOperationRouter(_sessionRegistry, new HostWmiContextResolver());
+        HostId hostId = HostId.FromProfile(_profile);
+        HostConnectResult result = await _sessionRegistry.ConnectAsync(
+            HostConnectRequest.ForConfirmedDiagnostic(
                 _profile,
                 diagnostic.ConsoleAvailable,
                 _transientCredential),
             cancellationToken);
-        HostBasicSnapshot? snapshot = result.Snapshot.BasicSnapshot;
+        HostSessionSnapshot? session = result.Snapshot.TryGet(hostId, out HostSessionSnapshot? connected)
+            ? connected
+            : null;
+        HostBasicSnapshot? snapshot = session?.BasicSnapshot;
         _report.Add(
-            "原子激活与基础快照",
+            "连接与基础快照",
             result.Succeeded ? AcceptanceStatus.Passed : AcceptanceStatus.Failed,
             stopwatch.Elapsed,
             result.Message,
             new Dictionary<string, object?>
             {
-                ["切换状态"] = result.Status.ToString(),
-                ["活动宿主"] = result.Snapshot.ActiveSession.Target.Address,
-                ["会话代次"] = result.Snapshot.ActiveSession.Generation,
+                ["连接状态"] = result.Status.ToString(),
+                ["本机始终存在"] = result.Snapshot.TryGet(HostId.Local, out _),
+                ["远程宿主"] = session?.Target.Address,
+                ["会话代次"] = session?.Generation,
                 ["计算机名"] = snapshot?.ComputerName,
                 ["操作系统"] = snapshot?.OperatingSystem,
                 ["虚拟机数量"] = snapshot?.VirtualMachineCount
             });
     }
 
-    private async Task<bool> RunTwoHostSwitchAsync(
-        HostDiagnosticReport firstDiagnostic,
-        CancellationToken cancellationToken)
+    private async Task<bool> RunTwoHostCoexistenceAsync(CancellationToken cancellationToken)
     {
+        HostId primaryHostId = HostId.FromProfile(_profile);
         if (_secondProfile is null)
         {
+            bool localAndPrimary = _sessionRegistry!.Current.TryGet(HostId.Local, out _)
+                                   && _sessionRegistry.Current.TryGet(primaryHostId, out _);
             _report.Add(
-                "两台受控宿主切换",
+                "两台远程宿主并行",
                 AcceptanceStatus.Skipped,
                 TimeSpan.Zero,
-                "未设置 EXHYPERV_INTEGRATION_SECOND_HOST；本次运行不能证明两台远程宿主之间的切换。 ");
-            return true;
+                localAndPrimary
+                    ? "本机与第一远程宿主已并行；未设置 EXHYPERV_INTEGRATION_SECOND_HOST，第二远程宿主场景由确定性测试覆盖。 "
+                    : "本机与第一远程宿主未同时保留。 ");
+            return localAndPrimary;
         }
 
         var stopwatch = Stopwatch.StartNew();
@@ -351,94 +360,87 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
         if (!secondDiagnostic.ManagementAvailable)
         {
             _report.Add(
-                "两台受控宿主切换",
+                "两台远程宿主并行",
                 AcceptanceStatus.Failed,
                 stopwatch.Elapsed,
-                "第二受控宿主的 WMI/DCOM 管理通道不可用，未离开第一活动宿主。 ",
-                new Dictionary<string, object?>
-                {
-                    ["第一宿主"] = _profile.Address,
-                    ["第二宿主"] = _secondProfile.Address
-                });
-            return IsPrimaryActive();
+                "第二受控宿主的 WMI/DCOM 管理通道不可用；第一宿主保持连接。 ");
+            return _sessionRegistry!.Current.TryGet(primaryHostId, out _);
         }
 
-        long firstGeneration = _coordinator!.Current.ActiveSession.Generation;
-        _coordinator.SelectProfile(_secondProfile);
-        HostSwitchResult secondSwitch = await _coordinator.SwitchToSelectedAsync(
-            HostSwitchRequest.ForConfirmedDiagnostic(
+        HostSessionSnapshot primaryBefore = _sessionRegistry!.Current.GetRequired(primaryHostId);
+        HostId secondHostId = HostId.FromProfile(_secondProfile);
+        HostConnectResult secondConnect = await _sessionRegistry.ConnectAsync(
+            HostConnectRequest.ForConfirmedDiagnostic(
                 _secondProfile,
                 secondDiagnostic.ConsoleAvailable,
                 _transientCredential),
             cancellationToken);
-        if (!secondSwitch.Succeeded)
+        HostVmReadResult<List<VmInstance>> secondVmRead = secondConnect.Succeeded
+            ? await _vmOperations!.ReadAsync(
+                secondHostId,
+                (context, token) => new VmQueryService().GetVmListAsync(context, token),
+                cancellationToken)
+            : new HostVmReadResult<List<VmInstance>>(
+                HostVmOperationStatus.Failed,
+                null,
+                secondConnect.Message,
+                null);
+
+        HostRegistrySnapshot concurrent = _sessionRegistry.Current;
+        bool localPresent = concurrent.TryGet(HostId.Local, out _);
+        bool primaryPresent = concurrent.TryGet(primaryHostId, out HostSessionSnapshot? primaryDuring);
+        bool secondPresent = concurrent.TryGet(secondHostId, out HostSessionSnapshot? secondDuring);
+        bool threeHosts = localPresent && primaryPresent && secondPresent;
+        bool primaryUnchanged = primaryDuring?.Generation == primaryBefore.Generation;
+
+        HostDisconnectResult? secondDisconnect = null;
+        if (_sessionRegistry.TryPrepareDisconnect(
+                secondHostId,
+                out IHostDisconnectPreparation? preparation,
+                out _))
         {
-            _coordinator.SelectProfile(_profile);
-            _report.Add(
-                "两台受控宿主切换",
-                AcceptanceStatus.Failed,
-                stopwatch.Elapsed,
-                $"从第一宿主切换到第二宿主失败：{AcceptanceReport.Safe(secondSwitch.Message)}",
-                new Dictionary<string, object?>
-                {
-                    ["第一宿主"] = _profile.Address,
-                    ["第二宿主"] = _secondProfile.Address,
-                    ["第二宿主切换状态"] = secondSwitch.Status.ToString()
-                });
-            return IsPrimaryActive();
+            using (preparation)
+                secondDisconnect = preparation!.Commit();
         }
-
-        long secondGeneration = secondSwitch.Snapshot.ActiveSession.Generation;
-        HostVmReadResult<List<VmInstance>> secondVmRead = await _vmOperations!.ReadAsync(
-            (context, token) => new VmQueryService().GetVmListAsync(context, token),
-            cancellationToken);
-
-        _coordinator.SelectProfile(_profile);
-        HostSwitchResult primarySwitch = await _coordinator.SwitchToSelectedAsync(
-            HostSwitchRequest.ForConfirmedDiagnostic(
-                _profile,
-                firstDiagnostic.ConsoleAvailable,
-                _transientCredential),
-            cancellationToken);
-        bool secondActive = secondSwitch.Snapshot.ActiveSession.Target.ProfileId == _secondProfile.Id
-                            && secondGeneration > firstGeneration
-                            && secondSwitch.Snapshot.BasicSnapshot is not null;
-        bool primaryRestored = primarySwitch.Succeeded
-                               && primarySwitch.Snapshot.ActiveSession.Target.ProfileId == _profile.Id
-                               && primarySwitch.Snapshot.ActiveSession.Generation > secondGeneration
-                               && primarySwitch.Snapshot.BasicSnapshot is not null;
-        bool complete = secondActive && secondVmRead.Succeeded && primaryRestored;
+        bool primaryRemains = _sessionRegistry.Current.TryGet(HostId.Local, out _)
+                              && _sessionRegistry.Current.TryGet(primaryHostId, out _)
+                              && !_sessionRegistry.Current.TryGet(secondHostId, out _);
+        bool complete = secondConnect.Succeeded
+                        && threeHosts
+                        && primaryUnchanged
+                        && secondVmRead.Succeeded
+                        && secondDisconnect?.Succeeded == true
+                        && primaryRemains;
         _report.Add(
-            "两台受控宿主切换",
+            "两台远程宿主并行",
             complete ? AcceptanceStatus.Passed : AcceptanceStatus.Failed,
             stopwatch.Elapsed,
             complete
-                ? "已完成第一宿主 → 第二宿主 → 第一宿主的原子切换，并通过第二宿主活动上下文读取真实 VM 列表。 "
-                : "两台受控宿主的往返切换或第二宿主 VM 读取证据不完整。 ",
+                ? "本机、第一远程宿主和第二远程宿主同时存在；第二宿主 VM 读取与断开未改变第一宿主。 "
+                : "两台远程宿主的并行、读取、隔离断开证据不完整。 ",
             new Dictionary<string, object?>
             {
                 ["第一宿主"] = _profile.Address,
-                ["第一宿主初始代次"] = firstGeneration,
+                ["第一宿主代次未变"] = primaryUnchanged,
                 ["第二宿主"] = _secondProfile.Address,
-                ["第二宿主切换状态"] = secondSwitch.Status.ToString(),
-                ["第二宿主代次"] = secondGeneration,
-                ["第二宿主快照计算机名"] = secondSwitch.Snapshot.BasicSnapshot?.ComputerName,
+                ["第二宿主连接状态"] = secondConnect.Status.ToString(),
+                ["第二宿主代次"] = secondDuring?.Generation,
+                ["第二宿主快照计算机名"] = secondDuring?.BasicSnapshot?.ComputerName,
                 ["第二宿主VM读取状态"] = secondVmRead.Status.ToString(),
                 ["第二宿主VM数量"] = secondVmRead.Value?.Count,
-                ["返回第一宿主状态"] = primarySwitch.Status.ToString(),
-                ["第一宿主恢复代次"] = primarySwitch.Snapshot.ActiveSession.Generation,
-                ["第一宿主快照计算机名"] = primarySwitch.Snapshot.BasicSnapshot?.ComputerName
+                ["三宿主同时存在"] = threeHosts,
+                ["第二宿主断开状态"] = secondDisconnect?.Status.ToString(),
+                ["断开后本机和第一宿主保留"] = primaryRemains
             });
-        return primaryRestored;
-
-        bool IsPrimaryActive() =>
-            _coordinator!.Current.ActiveSession.Target.ProfileId == _profile.Id;
+        return primaryRemains;
     }
 
     private async Task QueryVirtualMachinesAsync(CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
+        HostId hostId = HostId.FromProfile(_profile);
         HostVmReadResult<List<VmInstance>> result = await _vmOperations!.ReadAsync(
+            hostId,
             (context, token) => new VmQueryService().GetVmListAsync(context, token),
             cancellationToken);
         _virtualMachines = result.Value ?? [];
@@ -447,7 +449,7 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
             "真实远程虚拟机列表",
             result.Succeeded ? AcceptanceStatus.Passed : AcceptanceStatus.Failed,
             stopwatch.Elapsed,
-            result.Succeeded ? $"通过活动会话读取到 {_virtualMachines.Count} 台虚拟机。 " : result.Message,
+            result.Succeeded ? $"通过指定远程宿主读取到 {_virtualMachines.Count} 台虚拟机。 " : result.Message,
             new Dictionary<string, object?>
             {
                 ["操作状态"] = result.Status.ToString(),
@@ -474,12 +476,14 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
             return;
         }
 
-        var sessions = new ActiveHostConsoleSessions(_coordinator!);
+        HostId hostId = HostId.FromProfile(_profile);
+        var sessions = new HostConsoleSessions(_sessionRegistry!);
         HostConsoleSessionCapture capture = sessions.Capture(
+            hostId,
             "baf3c735-4a86-4bb6-85dc-c0b829ce72f6",
             "TCP 2179 能力门控探针");
         PartialAvailabilityEvidence evidence = PartialAvailabilityAcceptance.Evaluate(
-            _coordinator!.Current,
+            _sessionRegistry!.Current.GetRequired(hostId),
             _vmReadSucceeded,
             capture);
         _report.Add(
@@ -523,17 +527,18 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
             return;
         }
 
-        var sessions = new ActiveHostConsoleSessions(_coordinator!);
-        HostConsoleSessionCapture capture = sessions.Capture(vm.Id.ToString("D"), vm.Name);
+        HostId hostId = HostId.FromProfile(_profile);
+        var sessions = new HostConsoleSessions(_sessionRegistry!);
+        HostConsoleSessionCapture capture = sessions.Capture(hostId, vm.Id.ToString("D"), vm.Name);
         bool valid = capture.Succeeded
                      && capture.Session?.Server == _profile.Address
-                     && capture.Session.Port == ActiveHostConsoleSessions.ConsolePort
+                     && capture.Session.Port == HostConsoleSessions.ConsolePort
                      && sessions.IsCurrent(capture.Session);
         _report.Add(
             "TCP 2179 控制台捕获",
             valid ? AcceptanceStatus.Passed : AcceptanceStatus.Failed,
             stopwatch.Elapsed,
-            valid ? "控制台会话绑定到当前活动宿主、会话代次和 TCP 2179。 " : capture.Message,
+            valid ? "控制台会话绑定到所属宿主、会话代次和 TCP 2179。 " : capture.Message,
             new Dictionary<string, object?>
             {
                 ["服务器"] = capture.Session?.Server,
@@ -567,8 +572,10 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
             return;
         }
 
-        HostOperationStamp stamp = _coordinator!.CaptureOperationStamp();
+        HostId hostId = HostId.FromProfile(_profile);
+        HostOperationStamp stamp = _sessionRegistry!.CaptureOperationStamp(hostId);
         HostVmWriteResult result = await _vmOperations!.WriteAsync(
+            hostId,
             async (context, token) =>
             {
                 ApiResponse response = await VmPowerService.ExecuteControlActionAsync(
@@ -799,25 +806,32 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
             $"[断线] 请在 {_options.OutageStartDelay.TotalSeconds:0} 秒内从外部阻断受控宿主网络，并保持阻断，直到运行器明确提示可以恢复。运行器不会修改本机或远程网络配置。 ");
         await Task.Delay(_options.OutageStartDelay, cancellationToken);
 
-        long generation = _coordinator!.Current.ActiveSession.Generation;
-        HostBasicSnapshot? originalSnapshot = _coordinator.Current.BasicSnapshot;
+        HostId hostId = HostId.FromProfile(_profile);
+        HostSessionSnapshot initialSnapshot = _sessionRegistry!.Current.GetRequired(hostId);
+        long generation = initialSnapshot.Generation;
+        HostBasicSnapshot? originalSnapshot = initialSnapshot.BasicSnapshot;
         var observer = new DisconnectAcceptanceObserver(
             _profile.Id,
             generation,
             originalSnapshot?.RefreshedAt ?? DateTimeOffset.MinValue);
         DateTimeOffset detectDeadline = DateTimeOffset.UtcNow + _options.OutageDetectionTimeout;
-        void ObserveState(object? sender, ActiveHostStateChangedEventArgs change)
-            => observer.Observe(change.Current, DateTimeOffset.UtcNow);
-        _coordinator.StateChanged += ObserveState;
+        void ObserveState(object? sender, HostRegistryChangedEventArgs change)
+        {
+            if (change.ChangedHostId == hostId
+                && change.Current.TryGet(hostId, out HostSessionSnapshot? snapshot))
+                observer.Observe(snapshot!, DateTimeOffset.UtcNow);
+        }
+        _sessionRegistry.Changed += ObserveState;
         try
         {
-            observer.Observe(_coordinator.Current, DateTimeOffset.UtcNow);
+            observer.Observe(_sessionRegistry.Current.GetRequired(hostId), DateTimeOffset.UtcNow);
             while (DateTimeOffset.UtcNow < detectDeadline && !observer.Capture().StaleDataObserved)
             {
                 _ = await _vmOperations!.ReadAsync(
+                    hostId,
                     (context, token) => new VmQueryService().GetVmListAsync(context, token),
                     cancellationToken);
-                observer.Observe(_coordinator.Current, DateTimeOffset.UtcNow);
+                observer.Observe(_sessionRegistry.Current.GetRequired(hostId), DateTimeOffset.UtcNow);
                 if (!observer.Capture().StaleDataObserved)
                     await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
             }
@@ -832,7 +846,8 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
                 return;
             }
 
-            bool writeBlocked = !_coordinator.TryBeginWrite(
+            bool writeBlocked = !_sessionRegistry.TryBeginWrite(
+                hostId,
                 out IHostWriteLease? rejectedLease,
                 out string writeBlockReason);
             rejectedLease?.Dispose();
@@ -842,7 +857,7 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
             bool restorePromptShown = false;
             while (DateTimeOffset.UtcNow < reconnectDeadline)
             {
-                observer.Observe(_coordinator.Current, DateTimeOffset.UtcNow);
+                observer.Observe(_sessionRegistry.Current.GetRequired(hostId), DateTimeOffset.UtcNow);
                 DisconnectAcceptanceEvidence evidence = observer.Capture();
                 if (!restorePromptShown && evidence.BackoffGrowthObserved)
                 {
@@ -865,11 +880,11 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
                         new Dictionary<string, object?>
                         {
                             ["断线前会话代次"] = generation,
-                            ["恢复后会话代次"] = _coordinator.Current.ActiveSession.Generation,
+                            ["恢复后会话代次"] = _sessionRegistry.Current.GetRequired(hostId).Generation,
                             ["观察到旧数据"] = evidence.StaleDataObserved,
                             ["旧数据期间写入被拒绝"] = evidence.WriteBlockedWhileStale,
                             ["写入拒绝原因"] = evidence.WriteBlockReason,
-                            ["始终保持远程活动宿主"] = evidence.StayedOnExpectedRemoteHost,
+                            ["目标远程宿主始终保留"] = evidence.StayedOnExpectedRemoteHost,
                             ["退避递增"] = evidence.BackoffGrowthObserved,
                             ["退避未超过30秒"] = evidence.BackoffCapRespected,
                             ["观察到的退避秒数"] = evidence.ScheduledDelaysSeconds,
@@ -890,39 +905,68 @@ internal sealed class ControlledHostAcceptanceRunner(IntegrationOptions options)
         }
         finally
         {
-            _coordinator.StateChanged -= ObserveState;
+            _sessionRegistry.Changed -= ObserveState;
         }
     }
 
-    private async Task ReturnToLocalAsync()
+    private void DisconnectPrimaryHost()
     {
-        if (_coordinator is null) return;
+        if (_sessionRegistry is null) return;
+        HostId hostId = HostId.FromProfile(_profile);
+        var stopwatch = Stopwatch.StartNew();
         try
         {
-            _coordinator.StopReconnect();
-            using var cancellation = new CancellationTokenSource(_options.OperationTimeout);
-            HostSwitchResult result = await _coordinator.SwitchToLocalAsync(cancellation.Token);
+            _sessionRegistry.StopReconnect(hostId);
+            bool prepared = _sessionRegistry.TryPrepareDisconnect(
+                hostId,
+                out IHostDisconnectPreparation? preparation,
+                out string reason);
+            HostDisconnectResult? result = null;
+            if (prepared)
+            {
+                using (preparation)
+                    result = preparation!.Commit();
+            }
+            bool localRemains = _sessionRegistry.Current.TryGet(HostId.Local, out _);
+            bool remoteRemoved = !_sessionRegistry.Current.TryGet(hostId, out _);
+            bool succeeded = result?.Succeeded == true && localRemains && remoteRemoved;
             _report.Add(
-                "清理并返回本机",
-                result.Succeeded || result.Snapshot.ActiveSession.Target.IsLocal
-                    ? AcceptanceStatus.Passed
-                    : AcceptanceStatus.Failed,
-                TimeSpan.Zero,
-                result.Message,
+                "主动断开第一远程宿主",
+                succeeded ? AcceptanceStatus.Passed : AcceptanceStatus.Failed,
+                stopwatch.Elapsed,
+                result?.Message ?? reason,
                 new Dictionary<string, object?>
                 {
-                    ["活动宿主为本机"] = result.Snapshot.ActiveSession.Target.IsLocal,
-                    ["会话代次"] = result.Snapshot.ActiveSession.Generation
+                    ["断开状态"] = result?.Status.ToString(),
+                    ["本机仍保留"] = localRemains,
+                    ["目标远程宿主已移除"] = remoteRemoved
                 });
         }
         catch (Exception ex)
         {
             _report.Add(
-                "清理并返回本机",
+                "主动断开第一远程宿主",
                 AcceptanceStatus.Failed,
-                TimeSpan.Zero,
-                $"返回本机会话失败：{AcceptanceReport.Safe(ex.Message)}");
+                stopwatch.Elapsed,
+                $"断开远程宿主失败：{AcceptanceReport.Safe(ex.Message)}");
         }
+    }
+
+    private void CleanupRemoteSessions()
+    {
+        if (_sessionRegistry is null) return;
+        foreach (HostId hostId in _sessionRegistry.Current.Hosts
+                     .Where(session => !session.HostId.IsLocal)
+                     .Select(session => session.HostId)
+                     .ToArray())
+        {
+            _sessionRegistry.StopReconnect(hostId);
+            if (!_sessionRegistry.TryPrepareDisconnect(hostId, out IHostDisconnectPreparation? preparation, out _))
+                continue;
+            using (preparation)
+                _ = preparation!.Commit();
+        }
+        _sessionRegistry.Shutdown();
     }
 
     private VmInstance? ResolveVm(string selector)

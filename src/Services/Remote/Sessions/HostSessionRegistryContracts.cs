@@ -200,4 +200,9 @@ public sealed class HostRegistrySnapshot
         session = _hosts.FirstOrDefault(candidate => candidate.HostId == hostId);
         return session is not null;
     }
+
+    public HostSessionSnapshot GetRequired(HostId hostId) =>
+        TryGet(hostId, out HostSessionSnapshot? session)
+            ? session!
+            : throw new KeyNotFoundException("指定宿主不在会话注册表中。");
 }

@@ -15,7 +15,7 @@ namespace ExHyperV.ViewModels
         // ===== 字段 =====
 
         private readonly VmQueryService _queryService = new();
-        private readonly ActiveHostConsoleSession _session;
+        private readonly HostConsoleSession _session;
         private readonly HostId _hostId;
         private readonly IHostSessionRegistry _sessionRegistry;
         private readonly IHostOperationRouter _hostOperationRouter;
@@ -63,7 +63,7 @@ namespace ExHyperV.ViewModels
         // ===== 构造 =====
 
         public ConsoleViewModel(
-            ActiveHostConsoleSession session,
+            HostConsoleSession session,
             IHostSessionRegistry sessionRegistry)
         {
             _session = session ?? throw new ArgumentNullException(nameof(session));
