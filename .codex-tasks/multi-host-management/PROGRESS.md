@@ -5,9 +5,8 @@
 - 设计状态：已确认。
 - 跟踪规格：[GitHub Issue #14](https://github.com/jwxa/ExHyperV/issues/14)，标签 `ready-for-agent`。
 - 实施 Issues：[#15](https://github.com/jwxa/ExHyperV/issues/15) 至 [#22](https://github.com/jwxa/ExHyperV/issues/22)，均为 OPEN 且带 `ready-for-agent`。
-- 实施状态：#15-#21 已完成；#22 的代码、自动化和实机只读验收完成，等待主题修复后的人工视觉复核；尚未 push。
-- 已完成：[#15 扩展宿主身份与多会话注册表](https://github.com/jwxa/ExHyperV/issues/15)、[#16 本机与首台远程并列管理](https://github.com/jwxa/ExHyperV/issues/16)、[#17 多台远程宿主与隔离操作](https://github.com/jwxa/ExHyperV/issues/17)、[#18 旧数据与每宿主独立自动重连](https://github.com/jwxa/ExHyperV/issues/18)、[#19 安全断开宿主及其控制台](https://github.com/jwxa/ExHyperV/issues/19)、[#20 当前宿主实时脱敏日志](https://github.com/jwxa/ExHyperV/issues/20)、[#21 按诊断结果提供设置检查与修复](https://github.com/jwxa/ExHyperV/issues/21)。
-- 当前任务：[#22 收缩旧活动宿主模型并完成发布验收](https://github.com/jwxa/ExHyperV/issues/22)。
+- 实施状态：#15-#22 的本地实现与验收均已完成；尚未 push，GitHub Issues 保持 OPEN。
+- 已完成：[#15 扩展宿主身份与多会话注册表](https://github.com/jwxa/ExHyperV/issues/15)、[#16 本机与首台远程并列管理](https://github.com/jwxa/ExHyperV/issues/16)、[#17 多台远程宿主与隔离操作](https://github.com/jwxa/ExHyperV/issues/17)、[#18 旧数据与每宿主独立自动重连](https://github.com/jwxa/ExHyperV/issues/18)、[#19 安全断开宿主及其控制台](https://github.com/jwxa/ExHyperV/issues/19)、[#20 当前宿主实时脱敏日志](https://github.com/jwxa/ExHyperV/issues/20)、[#21 按诊断结果提供设置检查与修复](https://github.com/jwxa/ExHyperV/issues/21)、[#22 收缩旧活动宿主模型并完成发布验收](https://github.com/jwxa/ExHyperV/issues/22)。
 - 规格来源：`doc/multi-host-management-spec.md`。
 - 设计来源：`doc/multi-host-management-design.md`。
 
@@ -34,14 +33,14 @@
 - 已建立 #22 的 Full Single 子任务；收口范围限定为删除产品全局活动宿主兼容路径、迁移最终验收、统一主题资源和更新用户文档，不重写每宿主连接协议。
 - #22 已完成主体实现：删除产品全局活动宿主兼容路径，VM、控制台和本机专属操作统一通过注册表与显式 `HostId` 路由；本机固定存在，多远程宿主独立连接、重连和断开。
 - 完成度复审发现旧的 8 张视觉截图虽覆盖亮色/暗色与宽/窄窗口，但暗色日志来源/消息仍为黑色，亮色禁用连接按钮对比度不足。当前工作树已为日志正文显式使用主题主文字色，并让不可执行的连接动作使用中性 `Secondary` 外观；发布收敛测试已覆盖这两个合同。
-- 最新非交互验证：226/226 测试；Release/WPF 0 错误、246 个既有警告；32 个 XAML 可解析；UTF-8 无 BOM、冲突标记和差异检查通过。
+- 最新非交互验证：226/226 测试；Release/WPF 0 错误、247 个既有警告；32 个 XAML 可解析；UTF-8 无 BOM、冲突标记和差异检查通过。
 - #22 最终受控宿主只读验收通过：`10.0.0.6` 的 WMI/DCOM、TCP 2179、1 台 VM、控制台捕获和主动断开成功；7 项通过、6 项安全跳过、0 失败，四个危险开关均为 `false`。
+- #22 修复后人工视觉复核通过：用户确认亮色/暗色与宽/窄窗口下，日志正文和禁用连接按钮可读，页面无错位、重叠或文字截断；#15-#22 共 66/66 条验收要求均有证据。
 
 ## 下一步
 
-1. 提交本次主题可读性修复与完成度审计。
-2. 由用户在修复后的 Release 程序中完成亮色/暗色、宽/窄窗口人工视觉复核。
-3. 按维护者安排 push；视觉复核和远端合并完成前不关闭 #22 或父 Issue #14。
+1. 按维护者安排 push；当前不关闭 #15-#22 或父 Issue #14。
+2. 远端评审与合并完成后，再按 Issue 流程更新状态。
 
 ## 注意事项
 
