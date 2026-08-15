@@ -5,7 +5,7 @@
 - 设计状态：已确认。
 - 跟踪规格：[GitHub Issue #14](https://github.com/jwxa/ExHyperV/issues/14)，标签 `ready-for-agent`。
 - 实施 Issues：[#15](https://github.com/jwxa/ExHyperV/issues/15) 至 [#22](https://github.com/jwxa/ExHyperV/issues/22)，均为 OPEN 且带 `ready-for-agent`。
-- 实施状态：本地实现与验收完成；Issue #22 保持 OPEN，尚未 push。
+- 实施状态：#15-#21 已完成；#22 的代码、自动化和实机只读验收完成，等待主题修复后的人工视觉复核；尚未 push。
 - 已完成：[#15 扩展宿主身份与多会话注册表](https://github.com/jwxa/ExHyperV/issues/15)、[#16 本机与首台远程并列管理](https://github.com/jwxa/ExHyperV/issues/16)、[#17 多台远程宿主与隔离操作](https://github.com/jwxa/ExHyperV/issues/17)、[#18 旧数据与每宿主独立自动重连](https://github.com/jwxa/ExHyperV/issues/18)、[#19 安全断开宿主及其控制台](https://github.com/jwxa/ExHyperV/issues/19)、[#20 当前宿主实时脱敏日志](https://github.com/jwxa/ExHyperV/issues/20)、[#21 按诊断结果提供设置检查与修复](https://github.com/jwxa/ExHyperV/issues/21)。
 - 当前任务：[#22 收缩旧活动宿主模型并完成发布验收](https://github.com/jwxa/ExHyperV/issues/22)。
 - 规格来源：`doc/multi-host-management-spec.md`。
@@ -32,13 +32,16 @@
 - 已建立 #21 的 Full Single 子任务；沿用现有配置流水线，新增范围只包含诊断修复判定、当前上下文入口、逐条预检证据和旧诊断拒绝。
 - #21 已完成：修复入口仅由当前宿主的最新可处理诊断显示；预检日志逐条到达，修复上下文绑定配置 ID、IPv4 和诊断时间；Public 网络继续显式选择，非精确中文 `确认` 保持零修改，执行后沿用现有最小权限、回滚和复诊流水线；239/239 测试、Release/WPF 构建、UTF-8、敏感字面量、新增颜色和差异检查通过。
 - 已建立 #22 的 Full Single 子任务；收口范围限定为删除产品全局活动宿主兼容路径、迁移最终验收、统一主题资源和更新用户文档，不重写每宿主连接协议。
-- #22 已完成：删除产品全局活动宿主兼容路径，VM、控制台和本机专属操作统一通过注册表与显式 `HostId` 路由；本机固定存在，多远程宿主独立连接、重连和断开；216/216 测试、Release/WPF 构建、8 张真实 WPF 视觉检查、UTF-8、敏感字面量、主题颜色和差异门禁通过。
+- #22 已完成主体实现：删除产品全局活动宿主兼容路径，VM、控制台和本机专属操作统一通过注册表与显式 `HostId` 路由；本机固定存在，多远程宿主独立连接、重连和断开。
+- 完成度复审发现旧的 8 张视觉截图虽覆盖亮色/暗色与宽/窄窗口，但暗色日志来源/消息仍为黑色，亮色禁用连接按钮对比度不足。当前工作树已为日志正文显式使用主题主文字色，并让不可执行的连接动作使用中性 `Secondary` 外观；发布收敛测试已覆盖这两个合同。
+- 最新非交互验证：226/226 测试；Release/WPF 0 错误、246 个既有警告；32 个 XAML 可解析；UTF-8 无 BOM、冲突标记和差异检查通过。
 - #22 最终受控宿主只读验收通过：`10.0.0.6` 的 WMI/DCOM、TCP 2179、1 台 VM、控制台捕获和主动断开成功；7 项通过、6 项安全跳过、0 失败，四个危险开关均为 `false`。
 
 ## 下一步
 
-1. 审阅并提交 Issue #22 的独立提交。
-2. 按维护者安排 push，并在合并后关闭 #22 与父 Issue #14。
+1. 提交本次主题可读性修复与完成度审计。
+2. 由用户在修复后的 Release 程序中完成亮色/暗色、宽/窄窗口人工视觉复核。
+3. 按维护者安排 push；视觉复核和远端合并完成前不关闭 #22 或父 Issue #14。
 
 ## 注意事项
 

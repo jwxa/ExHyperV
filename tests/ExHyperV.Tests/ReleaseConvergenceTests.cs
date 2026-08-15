@@ -68,6 +68,7 @@ internal static class ReleaseConvergenceTests
     {
         string root = FindRepositoryRoot();
         string hostPage = File.ReadAllText(Path.Combine(root, "src", "Views", "Pages", "HostConnectionPage.xaml"));
+        string hostViewModel = File.ReadAllText(Path.Combine(root, "src", "ViewModels", "HostConnectionPageViewModel.cs"));
         string vmPage = File.ReadAllText(Path.Combine(root, "src", "Views", "Pages", "VirtualMachinesPage.xaml"));
 
         TestAssert.False(hostPage.Contains("#0C0C0C", StringComparison.OrdinalIgnoreCase),
@@ -78,6 +79,17 @@ internal static class ReleaseConvergenceTests
             "The host connection action still overrides theme-aware disabled text with white.");
         TestAssert.False(vmPage.Contains("#0B0B0B", StringComparison.OrdinalIgnoreCase),
             "The VM detail monitor still uses a hardcoded black background.");
+        string logSource = Slice(hostPage, "Text=\"{Binding Source}\"", "/>");
+        string logMessage = Slice(hostPage, "Text=\"{Binding Message}\"", "/>");
+        TestAssert.Contains("TextFillColorPrimaryBrush", logSource);
+        TestAssert.Contains("TextFillColorPrimaryBrush", logMessage);
+
+        string connectionAppearance = Slice(
+            hostViewModel,
+            "public ControlAppearance ConnectionActionAppearance =>",
+            "public string ConnectionActionToolTip");
+        TestAssert.Contains("!CanExecuteConnectionAction", connectionAppearance);
+        TestAssert.Contains("ControlAppearance.Secondary", connectionAppearance);
         TestAssert.Contains("ControlFillColorSecondaryBrush", hostPage);
         TestAssert.Contains("ControlFillColorSecondaryBrush", vmPage);
     }
@@ -166,6 +178,17 @@ internal static class ReleaseConvergenceTests
             .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
                            && !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
             .Select(File.ReadAllText));
+
+    private static string Slice(string source, string startMarker, string endMarker)
+    {
+        int start = source.IndexOf(startMarker, StringComparison.Ordinal);
+        int end = start < 0
+            ? -1
+            : source.IndexOf(endMarker, start + startMarker.Length, StringComparison.Ordinal);
+        TestAssert.True(start >= 0 && end > start,
+            $"Could not isolate source between '{startMarker}' and '{endMarker}'.");
+        return source[start..end];
+    }
 
     private static string FindRepositoryRoot()
     {

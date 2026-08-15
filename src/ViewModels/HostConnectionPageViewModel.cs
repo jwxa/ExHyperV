@@ -123,9 +123,11 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         }
     }
     public ControlAppearance ConnectionActionAppearance =>
-        SelectedHost?.Profile is { } profile && IsConnected(profile)
-            ? ControlAppearance.Danger
-            : ControlAppearance.Primary;
+        !CanExecuteConnectionAction
+            ? ControlAppearance.Secondary
+            : SelectedHost?.Profile is { } profile && IsConnected(profile)
+                ? ControlAppearance.Danger
+                : ControlAppearance.Primary;
     public string ConnectionActionToolTip
     {
         get

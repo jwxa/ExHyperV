@@ -1006,9 +1006,11 @@
                                                            Foreground="{Binding LevelBrush}" FontSize="12"/>
                                                 <TextBlock Grid.Column="3" Text="{Binding Source}" FontSize="12"
                                                            FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
+                                                           Foreground="{ui:ThemeResource TextFillColorPrimaryBrush}"
                                                            ToolTip="{Binding Source}"/>
                                                 <StackPanel Grid.Column="4" Margin="4,0,12,0">
-                                                    <TextBlock Text="{Binding Message}" TextWrapping="Wrap"/>
+                                                    <TextBlock Text="{Binding Message}" TextWrapping="Wrap"
+                                                               Foreground="{ui:ThemeResource TextFillColorPrimaryBrush}"/>
                                                     <TextBlock Text="{Binding DetailText}" TextWrapping="Wrap"
                                                                FontFamily="Consolas" FontSize="11" Margin="0,3,0,0"
                                                                Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"
