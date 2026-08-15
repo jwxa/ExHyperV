@@ -31,6 +31,7 @@ var tests = new List<(string Name, Action Run)>
     ("Sessions_ConcurrentSelectionKeepsLocalSessionCoherent", ConcurrentSelectionKeepsLocalSessionCoherent)
 };
 tests.AddRange(DiagnosticsTests.All);
+tests.AddRange(HostSessionRegistryTests.All);
 tests.AddRange(SessionSwitchTests.All);
 tests.AddRange(VmOperationTests.All);
 tests.AddRange(ConsoleSessionTests.All);

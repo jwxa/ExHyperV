@@ -1,0 +1,198 @@
+using ExHyperV.Services.Remote.Profiles;
+using ExHyperV.Services.Remote.Sessions;
+
+internal static class HostSessionRegistryTests
+{
+    public static IEnumerable<(string Name, Action Run)> All =>
+    [
+        ("HostIdentity_UsesProfileIdInsteadOfPresentation", UsesProfileIdInsteadOfPresentation),
+        ("VmIdentity_ScopesVmIdToOwningHost", ScopesVmIdToOwningHost),
+        ("HostRegistry_StartsWithFixedLocalSession", StartsWithFixedLocalSession),
+        ("HostRegistry_ConnectsTwoRemoteHostsWithoutReplacingLocal", ConnectsTwoRemoteHostsWithoutReplacingLocal),
+        ("HostRegistry_ReconnectAdvancesOnlyTargetHostGeneration", ReconnectAdvancesOnlyTargetHostGeneration)
+    ];
+
+    private static void UsesProfileIdInsteadOfPresentation()
+    {
+        Guid profileId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        var original = new HostProfile(profileId, "实验室主机", "10.0.0.6");
+        var edited = new HostProfile(profileId, "重命名后的主机", "10.0.0.7");
+
+        HostId first = HostId.FromProfile(original);
+        HostId second = HostId.FromProfile(edited);
+
+        TestAssert.Equal(first, second);
+        TestAssert.Equal(profileId, first.ProfileId);
+        TestAssert.False(first.IsLocal, "A profile-backed host was classified as local.");
+        TestAssert.True(HostId.Local.IsLocal, "HostId.Local was not classified as local.");
+        TestAssert.False(HostId.Local == first, "A remote host identity matched HostId.Local.");
+        AssertThrows<ArgumentException>(() => HostId.FromProfileId(Guid.Empty));
+    }
+
+    private static void ScopesVmIdToOwningHost()
+    {
+        Guid vmId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        HostId remoteHost = HostId.FromProfileId(Guid.Parse("22222222-2222-2222-2222-222222222222"));
+
+        var localVm = new VmKey(HostId.Local, vmId);
+        var remoteVm = new VmKey(remoteHost, vmId);
+        var sameRemoteVm = new VmKey(remoteHost, vmId);
+
+        TestAssert.False(localVm == remoteVm, "The same VM ID on different hosts produced the same key.");
+        TestAssert.Equal(remoteVm, sameRemoteVm);
+        TestAssert.Equal(remoteHost, remoteVm.HostId);
+        TestAssert.Equal(vmId, remoteVm.VmId);
+        AssertThrows<ArgumentException>(() => new VmKey(remoteHost, Guid.Empty));
+    }
+
+    private static void StartsWithFixedLocalSession()
+    {
+        IHostSessionRegistry registry = new HostSessionRegistry();
+
+        HostRegistrySnapshot snapshot = registry.Current;
+
+        TestAssert.Equal(1, snapshot.Hosts.Count);
+        HostSessionSnapshot local = snapshot.Hosts[0];
+        TestAssert.Equal(HostId.Local, local.HostId);
+        TestAssert.True(local.Target.IsLocal, "The fixed local registry entry did not target the local computer.");
+        TestAssert.Equal(1L, local.Generation);
+        TestAssert.Equal(HostConnectionState.LocalConnected, local.ConnectionState);
+        TestAssert.Equal(HostChannelState.Available, local.ManagementChannel);
+        TestAssert.Equal(HostChannelState.Available, local.ConsoleChannel);
+        TestAssert.False(local.HasStaleData, "The fixed local registry entry started with stale data.");
+    }
+
+    private static void ConnectsTwoRemoteHostsWithoutReplacingLocal()
+    {
+        var connector = new RegistryConnector();
+        var registry = new HostSessionRegistry(connector, new RegistrySnapshotLoader());
+        HostRegistrySnapshot startup = registry.Current;
+        HostProfile firstProfile = Profile("33333333-3333-3333-3333-333333333333", "宿主 A", "10.0.0.6");
+        HostProfile secondProfile = Profile("44444444-4444-4444-4444-444444444444", "宿主 B", "10.0.0.7");
+
+        HostConnectResult first = registry.ConnectAsync(Request(firstProfile)).GetAwaiter().GetResult();
+        HostConnectResult second = registry.ConnectAsync(Request(secondProfile)).GetAwaiter().GetResult();
+
+        TestAssert.Equal(HostConnectStatus.Succeeded, first.Status);
+        TestAssert.Equal(HostConnectStatus.Succeeded, second.Status);
+        TestAssert.Equal(1, startup.Hosts.Count);
+        TestAssert.Equal(3, registry.Current.Hosts.Count);
+        TestAssert.Equal(HostId.Local, registry.Current.Hosts[0].HostId);
+        TestAssert.Equal(HostId.FromProfile(firstProfile), registry.Current.Hosts[1].HostId);
+        TestAssert.Equal(HostId.FromProfile(secondProfile), registry.Current.Hosts[2].HostId);
+        TestAssert.Equal(2, connector.CallCount);
+    }
+
+    private static void ReconnectAdvancesOnlyTargetHostGeneration()
+    {
+        var registry = new HostSessionRegistry(
+            new RegistryConnector(),
+            new RegistrySnapshotLoader(),
+            new ImmediateReconnectScheduler());
+        HostProfile firstProfile = Profile("55555555-5555-5555-5555-555555555555", "宿主 A", "10.0.0.8");
+        HostProfile secondProfile = Profile("66666666-6666-6666-6666-666666666666", "宿主 B", "10.0.0.9");
+        HostId firstHostId = HostId.FromProfile(firstProfile);
+        HostId secondHostId = HostId.FromProfile(secondProfile);
+
+        try
+        {
+            registry.ConnectAsync(Request(firstProfile)).GetAwaiter().GetResult();
+            registry.ConnectAsync(Request(secondProfile)).GetAwaiter().GetResult();
+            HostRegistrySnapshot beforeLoss = registry.Current;
+            HostOperationStamp staleFirstStamp = registry.CaptureOperationStamp(firstHostId);
+            HostOperationStamp secondStamp = registry.CaptureOperationStamp(secondHostId);
+
+            TestAssert.True(
+                registry.ReportConnectionLoss(staleFirstStamp, "模拟宿主 A 连接丢失。"),
+                "The target host did not accept its current loss stamp.");
+            TestAssert.True(
+                SpinWait.SpinUntil(
+                    () => Session(registry.Current, firstHostId).Generation > staleFirstStamp.Generation,
+                    TimeSpan.FromSeconds(5)),
+                "The target host did not publish a recovered generation.");
+
+            TestAssert.Equal(staleFirstStamp.Generation, Session(beforeLoss, firstHostId).Generation);
+            TestAssert.Equal(secondStamp.Generation, Session(registry.Current, secondHostId).Generation);
+            TestAssert.False(registry.CanApply(staleFirstStamp), "A stale target-host stamp remained valid after reconnect.");
+            TestAssert.True(registry.CanApply(secondStamp), "Reconnect on host A invalidated host B's current stamp.");
+        }
+        finally
+        {
+            registry.Shutdown();
+        }
+    }
+
+    private static HostSessionSnapshot Session(HostRegistrySnapshot snapshot, HostId hostId) =>
+        snapshot.Hosts.Single(host => host.HostId == hostId);
+
+    private static HostConnectRequest Request(HostProfile profile) => new(
+        profile,
+        HostChannelState.Available,
+        HostChannelState.Available);
+
+    private static HostProfile Profile(string id, string name, string address) =>
+        new(Guid.Parse(id), name, address);
+
+    private static void AssertThrows<TException>(Action action) where TException : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (TException)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException($"Expected {typeof(TException).Name}, but no exception was thrown.");
+    }
+
+    private sealed class RegistryConnection : IHostManagementConnection;
+
+    private sealed class RegistryCandidate(HostProfile profile) : IHostSessionCandidate
+    {
+        public HostTarget Target { get; } = HostTarget.FromProfile(profile);
+        public IHostManagementConnection ManagementConnection { get; } = new RegistryConnection();
+        public HostChannelState ManagementChannel => HostChannelState.Available;
+        public HostChannelState ConsoleChannel => HostChannelState.Available;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class RegistryConnector : IHostSessionConnector
+    {
+        private int _callCount;
+
+        public int CallCount => _callCount;
+
+        public Task<IHostSessionCandidate> ConnectAsync(
+            HostSwitchRequest request,
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _callCount);
+            return Task.FromResult<IHostSessionCandidate>(new RegistryCandidate(request.Profile));
+        }
+    }
+
+    private sealed class RegistrySnapshotLoader : IHostBasicSnapshotLoader
+    {
+        public Task<HostBasicSnapshot> LoadAsync(
+            IHostSessionCandidate candidate,
+            CancellationToken cancellationToken) => Task.FromResult(new HostBasicSnapshot(
+                candidate.Target.DisplayName,
+                "Windows",
+                "Running",
+                1,
+                new DateTimeOffset(2026, 8, 15, 18, 0, 0, TimeSpan.FromHours(8))));
+    }
+
+    private sealed class ImmediateReconnectScheduler : IReconnectScheduler
+    {
+        public DateTimeOffset UtcNow => new(2026, 8, 15, 18, 0, 0, TimeSpan.FromHours(8));
+
+        public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+    }
+}
