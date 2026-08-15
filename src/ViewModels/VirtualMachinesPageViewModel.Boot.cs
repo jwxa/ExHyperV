@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Services;
+using ExHyperV.Services.Remote.Sessions;
 using ExHyperV.Tools;
 using Wpf.Ui.Controls;
 
@@ -11,6 +12,7 @@ namespace ExHyperV.ViewModels
         // ===== 引导顺序模块 =====
         private async Task RefreshBootOrderForSelectedVmAsync(VmInstanceViewModel vm)
         {
+            if (!HasHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (vm == null) return;
             try
             {
@@ -38,6 +40,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task GoToBootSettingsAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (SelectedVm == null) return;
             CurrentViewType = VmDetailViewType.BootSettings;
             IsLoadingSettings = true;
@@ -62,6 +65,8 @@ namespace ExHyperV.ViewModels
         private async Task SaveBootOrderAsync()
         {
             if (SelectedVm == null || SelectedVm.BootOrderItems == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             var vm = SelectedVm;   // await 期间用户可能切走，捕获当前 VM，回滚刷到正确对象
             var (success, message) = await VmBootService.SetBootOrderAsync(vm.Name, vm.BootOrderItems.ToList());

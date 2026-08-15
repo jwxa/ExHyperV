@@ -11,6 +11,9 @@ using CommunityToolkit.Mvvm.Messaging;
 using ExHyperV.Messages;
 using ExHyperV.Models;
 using ExHyperV.Services;
+using ExHyperV.Services.Remote.Sessions;
+using ExHyperV.Services.Remote.Vms;
+using ExHyperV.Services.Remote.Consoles;
 using ExHyperV.Interaction;
 using ExHyperV.Tools;
 using Wpf.Ui.Controls;
@@ -29,11 +32,15 @@ namespace ExHyperV.ViewModels
         // ===== 私有服务字段与依赖注入 =====
         private readonly VmQueryService _queryService;
         private readonly VmGpuService _vmGpuService;
+        private readonly IActiveHostSessionCoordinator _hostCoordinator;
+        private readonly ActiveHostVmOperations _hostVmOperations;
+        private readonly ActiveHostConsoleSessions _hostConsoleSessions;
 
 
         // ===== 监控与后台任务字段 =====
         private CpuMonitorService _cpuService = null!;
         private CancellationTokenSource? _monitoringCts;
+        private CancellationTokenSource _hostGenerationCts = new();
         private DispatcherTimer _uiTimer;
         // 防止监控循环对同一网卡重复并发起 IP/ARP 查询（无界堆积）
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _ipLookupsInFlight = new();
@@ -54,6 +61,31 @@ namespace ExHyperV.ViewModels
         [ObservableProperty] private bool _isLoading = true;
         [ObservableProperty] private bool _isLoadingSettings;
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(IsLocalHostActive))]
+        [NotifyPropertyChangedFor(nameof(CanUseLocalVmFeatures))]
+        private bool _isRemoteHostActive;
+        private HostCapabilityMatrix _capabilities =
+            HostCapabilityMatrix.Create(ActiveHostSession.CreateLocal(), isSwitching: false);
+        [ObservableProperty] private bool _isConsoleAvailable = true;
+        [ObservableProperty] private bool _areRemoteWritesAvailable = true;
+        [ObservableProperty] private string _consoleUnavailableText = string.Empty;
+        [ObservableProperty] private string _remoteWriteUnavailableText = string.Empty;
+        [ObservableProperty] private string _activeHostDisplayName = HostTarget.Local.DisplayName;
+        [ObservableProperty] private string _activeHostDisplayAddress = HostTarget.Local.Address;
+        public bool IsLocalHostActive => !IsRemoteHostActive;
+        public bool CanUseLocalVmFeatures =>
+            _capabilities[HostCapabilityKind.VmAdvancedSettings].CanExecute;
+        public string RemoteFeatureUnavailableText =>
+            _capabilities[HostCapabilityKind.VmAdvancedSettings].Reason;
+        public string LocalFileUnavailableText =>
+            _capabilities[HostCapabilityKind.LocalFileSystem].Reason;
+        public bool CanUseLocalFiles =>
+            _capabilities[HostCapabilityKind.LocalFileSystem].CanExecute;
+        public string CreateVmToolTip =>
+            _capabilities[HostCapabilityKind.LocalFileSystem].CanExecute
+                ? Properties.Resources.Xaml_CreateVm
+                : _capabilities[HostCapabilityKind.LocalFileSystem].Reason;
+        [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(IsVmListEnabled))]
         private VmDetailViewType _currentViewType = VmDetailViewType.Dashboard;
 
@@ -66,7 +98,9 @@ namespace ExHyperV.ViewModels
 
         // ===== 视图模型属性 - 虚拟机列表与选择 =====
         [ObservableProperty] private ObservableCollection<VmInstanceViewModel> _vmList = new();
-        [ObservableProperty] private VmInstanceViewModel _selectedVm;
+        [ObservableProperty]
+        [NotifyCanExecuteChangedFor(nameof(OpenNativeConnectCommand))]
+        private VmInstanceViewModel _selectedVm;
         [ObservableProperty] private BitmapSource? _thumbnail;
 
 
@@ -81,6 +115,11 @@ namespace ExHyperV.ViewModels
         {
             _queryService = queryService;
             _vmGpuService = new VmGpuService(_queryService);
+            _hostCoordinator = ActiveHostSessions.Current;
+            _hostVmOperations = new ActiveHostVmOperations(_hostCoordinator, new HostWmiContextResolver());
+            _hostConsoleSessions = new ActiveHostConsoleSessions(_hostCoordinator);
+            ApplyActiveHost(_hostCoordinator.Current);
+            _hostCoordinator.StateChanged += OnActiveHostStateChanged;
 
             WeakReferenceMessenger.Default.Register<AzureFeatureSetChangedMessage>(
                 this,
@@ -114,16 +153,109 @@ namespace ExHyperV.ViewModels
                 await Task.Delay(300);
                 Application.Current.Dispatcher.Invoke(() => LoadVmsCommand.Execute(null));
             });
-            Task.Run(() => _ipSnoop.Start()); // 后台启动 PktMon 嗅探，不阻塞构造
+            if (IsLocalHostActive)
+                Task.Run(() => _ipSnoop.Start()); // 后台启动 PktMon 嗅探，不阻塞构造
         }
 
         public void Dispose()
         {
             WeakReferenceMessenger.Default.UnregisterAll(this);
+            _hostCoordinator.StateChanged -= OnActiveHostStateChanged;
+            _hostGenerationCts.Cancel();
+            _hostGenerationCts.Dispose();
             _monitoringCts?.Cancel();
             _cpuService?.Dispose();
             _uiTimer?.Stop();
             // 不在此 Dispose 嗅探单例(全进程共用,退出时由其 ProcessExit 钩子清理)
+        }
+
+        private void OnActiveHostStateChanged(object? sender, ActiveHostStateChangedEventArgs change)
+        {
+            void ApplyChannelState()
+            {
+                ApplyActiveHost(change.Current);
+                if (change.Current.Capabilities[HostCapabilityKind.VmRead].CanExecute)
+                    StartMonitoring();
+                else
+                    StopMonitoring();
+            }
+            if (change.Previous.ActiveSession.Generation == change.Current.ActiveSession.Generation
+                && change.Previous.ActiveSession.Target.ProfileId == change.Current.ActiveSession.Target.ProfileId)
+            {
+                Dispatcher? currentDispatcher = Application.Current?.Dispatcher;
+                if (currentDispatcher is null || currentDispatcher.CheckAccess()) ApplyChannelState();
+                else currentDispatcher.Invoke(ApplyChannelState);
+                return;
+            }
+
+            void ResetForHost()
+            {
+                _hostGenerationCts.Cancel();
+                _hostGenerationCts.Dispose();
+                _hostGenerationCts = new CancellationTokenSource();
+                StopMonitoring();
+                ApplyActiveHost(change.Current);
+                CurrentViewType = VmDetailViewType.Dashboard;
+                IsCreatingVm = false;
+                SelectedVm = null;
+                Thumbnail = null;
+                _selectedVms.Clear();
+                SelectedVmCount = 0;
+                VmList = new ObservableCollection<VmInstanceViewModel>();
+                IsLoading = true;
+                if (change.Current.Capabilities[HostCapabilityKind.VmRead].CanExecute)
+                    _ = LoadVmsAsync();
+                else
+                    IsLoading = false;
+            }
+
+            Dispatcher? dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher is null || dispatcher.CheckAccess()) ResetForHost();
+            else dispatcher.Invoke(ResetForHost);
+        }
+
+        private void ApplyActiveHost(ActiveHostCoordinatorSnapshot snapshot)
+        {
+            ActiveHostSession session = snapshot.ActiveSession;
+            _capabilities = snapshot.Capabilities;
+            HostTarget target = session.Target;
+            IsRemoteHostActive = snapshot.Capabilities.IsRemoteHost;
+            ActiveHostDisplayName = target.DisplayName;
+            ActiveHostDisplayAddress = target.Address;
+            HostCapability write = snapshot.Capabilities[HostCapabilityKind.VmWrite];
+            AreRemoteWritesAvailable = write.CanExecute;
+            RemoteWriteUnavailableText = write.Reason;
+            HostCapability console = snapshot.Capabilities[HostCapabilityKind.VmConsole];
+            IsConsoleAvailable = console.CanExecute;
+            ConsoleUnavailableText = console.CanExecute
+                ? "打开 TCP 2179 虚拟机控制台。"
+                : console.Reason;
+            OnPropertyChanged(nameof(RemoteFeatureUnavailableText));
+            OnPropertyChanged(nameof(LocalFileUnavailableText));
+            OnPropertyChanged(nameof(CanUseLocalFiles));
+            OnPropertyChanged(nameof(CreateVmToolTip));
+            OnPropertyChanged(nameof(CanUseLocalVmFeatures));
+            if (!CanUseLocalVmFeatures && CurrentViewType != VmDetailViewType.Dashboard)
+            {
+                CurrentViewType = VmDetailViewType.Dashboard;
+                IsCreatingVm = false;
+            }
+            OpenNativeConnectCommand.NotifyCanExecuteChanged();
+            MultiPowerCommand.NotifyCanExecuteChanged();
+            foreach (VmInstanceViewModel vm in VmList)
+                vm.ControlCommand?.NotifyCanExecuteChanged();
+        }
+
+        private bool CanExecuteVmWrite() =>
+            _capabilities[HostCapabilityKind.VmWrite].CanExecute;
+
+        private bool CanOpenConsole() =>
+            SelectedVm is not null && _capabilities[HostCapabilityKind.VmConsole].CanExecute;
+
+        private void StopMonitoring()
+        {
+            CancellationTokenSource? monitoring = Interlocked.Exchange(ref _monitoringCts, null);
+            monitoring?.Cancel();
         }
 
 
@@ -176,6 +308,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task OpenVmFolderAsync(VmInstanceViewModel vm)
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             if (vm == null) return;
             try
             {
@@ -219,24 +352,63 @@ namespace ExHyperV.ViewModels
             SelectedVmCount = _selectedVms.Count;
         }
 
-        [RelayCommand]
+        [RelayCommand(CanExecute = nameof(CanExecuteVmWrite))]
         private async Task MultiPowerAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmWrite)) return;
             var targets = _selectedVms.ToList();
             if (targets.Count == 0) return;
             bool allRunning = targets.All(v => v.IsRunning);
-            string action = allRunning ? "Stop" : "Start";                    // 与单机右键/主按钮一致：Stop=优雅失败则硬关
+            string action = allRunning ? "Stop" : "Start";
             var toAct = (allRunning ? targets.Where(v => v.IsRunning) : targets.Where(v => !v.IsRunning)).ToList();
-            // 复用每台自己的 ControlCommand：连带 transient 态、状态回同步、开机失败的反应式修复都照走。
-            await Task.WhenAll(toAct.Select(v => v.ControlCommand?.ExecuteAsync(action) ?? Task.CompletedTask));
+            if (!_hostCoordinator.TryCaptureManagementOperation(out HostManagementOperationContext? operation, out string reason))
+            {
+                ShowError(reason);
+                return;
+            }
+            if (allRunning)
+            {
+                bool confirmed = await Dialogs.ShowConfirmAsync(
+                    "批量正常关机",
+                    $"将在宿主“{operation!.Target.DisplayName}”上正常关闭 {toAct.Count} 台虚拟机。",
+                    Properties.Resources.Button_ShutDown,
+                    Properties.Resources.Button_Cancel,
+                    isDanger: true);
+                if (!confirmed) return;
+                if (!EnsureHostCapability(HostCapabilityKind.VmWrite)
+                    || !_hostCoordinator.CanApply(operation!.Stamp)) return;
+            }
+
+            foreach (VmInstanceViewModel vm in toAct) vm.SetTransientState(GetOptimisticText(action));
+            HostVmWriteResult result = await _hostVmOperations.WriteAsync(
+                async (context, token) =>
+                {
+                    var failures = new List<string>();
+                    foreach (VmInstanceViewModel vm in toAct)
+                    {
+                        ApiResponse response = await VmPowerService.ExecuteControlActionAsync(vm.Name, action, context, token);
+                        if (!response.Success) failures.Add($"{vm.Name}: {FriendlyError.CleanLines(response.Error)}");
+                    }
+                    return failures.Count == 0
+                        ? HostVmBackendWriteResult.Success()
+                        : HostVmBackendWriteResult.Failure(string.Join(Environment.NewLine, failures));
+                },
+                operation!.Stamp,
+                _hostGenerationCts.Token);
+            foreach (VmInstanceViewModel vm in toAct) vm.ClearTransientState();
+            if (!result.Succeeded) ShowError(result.Message);
+            await LoadVmsAsync();
             OnPropertyChanged(nameof(MultiPowerToggleText));
         }
 
         [RelayCommand]
         private async Task DeleteVmAsync(VmInstanceViewModel vm)
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (IsMultiSelect) { await DeleteMultipleAsync(_selectedVms.ToList()); return; }
             if (vm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             IsLoading = true;
 
             try
@@ -262,12 +434,15 @@ namespace ExHyperV.ViewModels
         // 批量删除（保留磁盘）：确认 → 逐台删 → 聚合汇报 → 收拾选中项。
         private async Task DeleteMultipleAsync(List<VmInstanceViewModel> targets)
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (targets.Count == 0) return;
             bool ok = await Dialogs.ShowConfirmAsync(
                 Properties.Resources.VmPage_MultiDeleteTitle,
                 string.Format(Properties.Resources.VmPage_MultiDeleteConfirm, targets.Count),
                 Properties.Resources.Xaml_Delete, Properties.Resources.Button_Cancel, isDanger: true);
             if (!ok) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             IsLoading = true;
             try
@@ -289,6 +464,7 @@ namespace ExHyperV.ViewModels
         // 批量彻底删除：不逐台展开文件预览（台数多会撑爆），改用名称清单确认 → 逐台彻底删 → 聚合汇报。
         private async Task PurgeMultipleAsync(List<VmInstanceViewModel> targets)
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             if (targets.Count == 0) return;
             string list = string.Join("\n", targets.Select(t => "· " + t.Name));
             bool ok = await Dialogs.ShowConfirmAsync(
@@ -296,6 +472,8 @@ namespace ExHyperV.ViewModels
                 string.Format(Properties.Resources.VmPage_MultiPurgeConfirm, targets.Count) + "\n\n" + list,
                 Properties.Resources.VmPage_PurgeBtn, Properties.Resources.Button_Cancel, isDanger: true);
             if (!ok) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.LocalFileSystem, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             IsLoading = true;
             try
@@ -317,6 +495,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task PurgeVmAsync(VmInstanceViewModel vm)
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             if (IsMultiSelect) { await PurgeMultipleAsync(_selectedVms.ToList()); return; }
             if (vm == null) return;
 
@@ -370,6 +549,8 @@ namespace ExHyperV.ViewModels
 
             var result = await dialog.ShowDialogAsync();
             if (result != Wpf.Ui.Controls.MessageBoxResult.Primary) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.LocalFileSystem, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             IsLoading = true;
             try
@@ -400,6 +581,11 @@ namespace ExHyperV.ViewModels
             HostDisks.Clear();
             if (value == null) { CurrentViewType = VmDetailViewType.Dashboard; return; }
             IsCreatingVm = false;
+            if (IsRemoteHostActive)
+            {
+                CurrentViewType = VmDetailViewType.Dashboard;
+                return;
+            }
 
             // 切 VM 时保留当前的无状态详情子页：重跑对应 GoTo 加载新 VM 的数据、停在同一子页(去 B 的对应详情页)；
             // 概览及其它一律回概览。进行中向导(AddGpu*/AddStorage)期间左侧列表已禁用，不会走到这里。
@@ -431,47 +617,86 @@ namespace ExHyperV.ViewModels
             var instance = new VmInstanceViewModel(snapshot);
 
             // 绑定电源控制命令 (必须绑定，否则新发现的 VM 按钮无效)
-            instance.ControlCommand = new AsyncRelayCommand<string>(async (action) => {
-                instance.SetTransientState(GetOptimisticText(action));
-                try
-                {
-                    var result = await VmPowerService.ExecuteControlActionAsync(instance.Name, action);
-                    if (!result.Success)
-                    {
-                        // 引擎拒绝了操作(配置错误/资源不足/GPU 分区不可用等)——清乐观态
-                        Application.Current.Dispatcher.Invoke(() => instance.ClearTransientState());
-                        // 反应式修复:开机失败且该 VM 存在悬空 GPU-PV(钉死的物理 GPU 已不在主机)时,弹确认→清除→重试。
-                        // 这类记录在 WMI 层完全隐形、官方 cmdlet 删不掉,只能走 .vmcx 引擎(见 VmGpuRepairService)。
-                        if ((action == "Start" || action == "Restart")
-                            && await TryRepairStaleGpuPvAndRetryAsync(instance, action, result.Error))
-                        {
-                            return; // 已介入处理,不再弹通用报错
-                        }
-                        // 同款反应式修复:开机失败且挂着悬空直通物理盘 → 弹确认 → 移除 → 重试。
-                        if ((action == "Start" || action == "Restart")
-                            && await TryRemoveStalePassthroughDiskAndRetryAsync(instance, action, result.Error))
-                        {
-                            return;
-                        }
-                        ShowError(FriendlyError.CleanLines(result.Error));
-                        return;
-                    }
-                    await SyncSingleVmStateAsync(instance);
-                    if (action == "Start" || action == "Restart")
-                    {
-                        TryApplyAffinityForRootScheduler(instance);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Application.Current.Dispatcher.Invoke(() => instance.ClearTransientState());
-                    var realEx = ex;
-                    while (realEx.InnerException != null) { realEx = realEx.InnerException; }
-                    ShowError(FriendlyError.CleanLines(realEx.Message));
-                }
-            });
+            instance.ControlCommand = new AsyncRelayCommand<string>(async action =>
+            {
+                if (string.IsNullOrWhiteSpace(action)) return;
+                await ExecutePowerActionAsync(instance, action);
+            }, _ => CanExecuteVmWrite());
 
             return instance;
+        }
+
+        private async Task ExecutePowerActionAsync(VmInstanceViewModel instance, string action)
+        {
+            if (!EnsureHostCapability(HostCapabilityKind.VmWrite)) return;
+            if (!_hostCoordinator.TryCaptureManagementOperation(out HostManagementOperationContext? operation, out string reason))
+            {
+                ShowError(reason);
+                return;
+            }
+
+            if (action is "Stop" or "TurnOff" or "Restart")
+            {
+                string verb = action switch
+                {
+                    "Stop" => "正常关闭",
+                    "TurnOff" => "强制关闭",
+                    _ => "重启"
+                };
+                bool confirmed = await Dialogs.ShowConfirmAsync(
+                    $"确认{verb}",
+                    $"将在宿主“{operation!.Target.DisplayName}”上{verb}虚拟机“{instance.Name}”。",
+                    verb,
+                    Properties.Resources.Button_Cancel,
+                    isDanger: true);
+                if (!confirmed) return;
+                if (!EnsureHostCapability(HostCapabilityKind.VmWrite)
+                    || !_hostCoordinator.CanApply(operation!.Stamp)) return;
+            }
+
+            instance.SetTransientState(GetOptimisticText(action));
+            try
+            {
+                HostVmWriteResult operationResult = await _hostVmOperations.WriteAsync(
+                    async (context, token) =>
+                    {
+                        ApiResponse response = await VmPowerService.ExecuteControlActionAsync(instance.Name, action, context, token);
+                        return response.Success
+                            ? HostVmBackendWriteResult.Success()
+                            : HostVmBackendWriteResult.Failure(response);
+                    },
+                    operation!.Stamp,
+                    _hostGenerationCts.Token);
+                if (!operationResult.Succeeded)
+                {
+                    Application.Current.Dispatcher.Invoke(() => instance.ClearTransientState());
+                    if (IsLocalHostActive
+                        && (action == "Start" || action == "Restart")
+                        && await TryRepairStaleGpuPvAndRetryAsync(instance, action, operationResult.Message))
+                    {
+                        return;
+                    }
+                    if (IsLocalHostActive
+                        && (action == "Start" || action == "Restart")
+                        && await TryRemoveStalePassthroughDiskAndRetryAsync(instance, action, operationResult.Message))
+                    {
+                        return;
+                    }
+                    ShowError(FriendlyError.CleanLines(operationResult.Message));
+                    return;
+                }
+
+                await SyncSingleVmStateAsync(instance);
+                if (IsLocalHostActive && (action == "Start" || action == "Restart"))
+                    TryApplyAffinityForRootScheduler(instance);
+            }
+            catch (Exception ex)
+            {
+                Application.Current.Dispatcher.Invoke(() => instance.ClearTransientState());
+                Exception realEx = ex;
+                while (realEx.InnerException != null) realEx = realEx.InnerException;
+                ShowError(FriendlyError.CleanLines(realEx.Message));
+            }
         }
 
         // 开机失败 → 若该 VM 存在悬空 GPU-PV(钉死的物理 GPU 已不在主机),弹确认 → 引擎清除 → 重试开机。
@@ -511,6 +736,9 @@ namespace ExHyperV.ViewModels
                 isDanger: true, showIcon: false, maxWidth: 340);
             if (!ok) return true; // 用户取消:已介入,不再弹通用报错
 
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return true;
+            using var writeScope = writeLease;
+
             var (success, repairMsg, rebound, removed) = await VmGpuRepairService.RepairAsync(instance.Name, stale);
             if (!success)
             {
@@ -524,11 +752,11 @@ namespace ExHyperV.ViewModels
 
             // 重试开机(引擎就地改 .vmcx 即生效,无需停 vmms)
             instance.SetTransientState(GetOptimisticText(action));
-            var retry = await VmPowerService.ExecuteControlActionAsync(instance.Name, action);
-            if (!retry.Success)
+            HostVmWriteResult retry = await ExecuteCurrentHostPowerWriteAsync(instance.Name, action);
+            if (!retry.Succeeded)
             {
                 Application.Current.Dispatcher.Invoke(() => instance.ClearTransientState());
-                ShowError(FriendlyError.CleanLines(retry.Error));
+                ShowError(FriendlyError.CleanLines(retry.Message));
             }
             else
             {
@@ -561,6 +789,9 @@ namespace ExHyperV.ViewModels
                 isDanger: true, showIcon: false, maxWidth: 360);
             if (!ok) return true; // 用户取消:已介入,不再弹通用报错
 
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return true;
+            using var writeScope = writeLease;
+
             int removed = 0;
             foreach (var d in stale)
             {
@@ -575,11 +806,11 @@ namespace ExHyperV.ViewModels
             ShowSuccess(string.Format(Properties.Resources.Storage_StaleDiskRemoved, removed));
 
             instance.SetTransientState(GetOptimisticText(action));
-            var retry = await VmPowerService.ExecuteControlActionAsync(instance.Name, action);
-            if (!retry.Success)
+            HostVmWriteResult retry = await ExecuteCurrentHostPowerWriteAsync(instance.Name, action);
+            if (!retry.Succeeded)
             {
                 Application.Current.Dispatcher.Invoke(() => instance.ClearTransientState());
-                ShowError(FriendlyError.CleanLines(retry.Error));
+                ShowError(FriendlyError.CleanLines(retry.Message));
             }
             else
             {
@@ -588,6 +819,17 @@ namespace ExHyperV.ViewModels
             }
             return true;
         }
+
+        private Task<HostVmWriteResult> ExecuteCurrentHostPowerWriteAsync(string vmName, string action) =>
+            _hostVmOperations.WriteAsync(
+                async (context, token) =>
+                {
+                    ApiResponse response = await VmPowerService.ExecuteControlActionAsync(vmName, action, context, token);
+                    return response.Success
+                        ? HostVmBackendWriteResult.Success()
+                        : HostVmBackendWriteResult.Failure(response);
+                },
+                cancellationToken: _hostGenerationCts.Token);
 
         private static string DescribeStalePassthroughDisk(VmStorageItem d)
             => !string.IsNullOrEmpty(d.DiskModel) ? d.DiskModel
@@ -600,24 +842,39 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task LoadVmsAsync()
         {
+            HostCapability readCapability = _capabilities[HostCapabilityKind.VmRead];
+            if (!readCapability.CanExecute)
+            {
+                IsLoading = false;
+                return;
+            }
             if (IsLoading && VmList.Count > 0) return;
             IsLoading = true;
+            CancellationTokenSource loadGeneration = _hostGenerationCts;
             try
             {
-                var finalCollection = await Task.Run(async () => {
-                    var vms = await _queryService.GetVmListAsync();
+                HostVmReadResult<List<VmInstance>> read = await _hostVmOperations.ReadAsync(
+                    (context, token) => _queryService.GetVmListAsync(context, token),
+                    loadGeneration.Token);
+                if (read.Status is HostVmOperationStatus.Cancelled or HostVmOperationStatus.Stale) return;
+                if (!read.Succeeded) throw new InvalidOperationException(read.Message);
+                if (loadGeneration.IsCancellationRequested
+                    || !ReferenceEquals(loadGeneration, _hostGenerationCts)) return;
+                var finalCollection = await Task.Run(() => {
                     var list = new ObservableCollection<VmInstanceViewModel>();
-                    foreach (var snapshot in vms)
+                    foreach (var snapshot in read.Value ?? [])
                     {
                         if (string.IsNullOrWhiteSpace(snapshot.Name)) continue;
                         list.Add(CreateVmInstance(snapshot));
                     }
                     return list;
                 });
+                if (loadGeneration.IsCancellationRequested
+                    || !ReferenceEquals(loadGeneration, _hostGenerationCts)) return;
 
                 VmList = finalCollection;
 
-                foreach (var vm in VmList.Where(v => v.IsRunning))
+                foreach (var vm in VmList.Where(v => IsLocalHostActive && v.IsRunning))
                 {
                     TryApplyAffinityForRootScheduler(vm);
                 }
@@ -648,7 +905,7 @@ namespace ExHyperV.ViewModels
             }
             finally
             {
-                IsLoading = false;
+                if (ReferenceEquals(loadGeneration, _hostGenerationCts)) IsLoading = false;
             }
             if (VmList.Count == 0)
             {
@@ -662,13 +919,23 @@ namespace ExHyperV.ViewModels
 
 
         // 打开沉浸式控制台窗口（取代外部 vmconnect.exe）
-        [RelayCommand]
+        [RelayCommand(CanExecute = nameof(CanOpenConsole))]
         private async Task OpenNativeConnectAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmConsole)) return;
             if (SelectedVm == null) return;
+            HostConsoleSessionCapture capture = _hostConsoleSessions.Capture(
+                SelectedVm.Id.ToString(),
+                SelectedVm.Name);
+            if (!capture.Succeeded)
+            {
+                ShowTip(capture.Message);
+                return;
+            }
 
             // 已禁用控制台支持(无合成显示)的 VM：打开控制台只会黑屏/连不上，明确提示而非打开
-            if (!await VmConsoleService.IsConsoleSupportEnabledAsync(SelectedVm.Name))
+            if (capture.Session!.Target.IsLocal
+                && !await VmConsoleService.IsConsoleSupportEnabledAsync(SelectedVm.Name))
             {
                 ShowTip(Properties.Resources.VmAdvanced_ConsoleDisabledHint);
                 return;
@@ -677,7 +944,7 @@ namespace ExHyperV.ViewModels
             try
             {
                 // 打开当前选中虚拟机的沉浸式控制台窗口（现走新的 RdpClientHost）
-                Navigation.OpenConsoleWindow(SelectedVm.Id.ToString(), SelectedVm.Name);
+                Navigation.OpenConsoleWindow(capture.Session);
             }
             catch (Exception ex)
             {
@@ -690,6 +957,8 @@ namespace ExHyperV.ViewModels
         private async Task ChangeOsTypeAsync(string newType)
         {
             if (SelectedVm == null || SelectedVm.OsType == newType) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             string oldOsType = SelectedVm.OsType;
             string oldNotes = SelectedVm.Notes;
             SelectedVm.OsType = newType;
@@ -711,10 +980,62 @@ namespace ExHyperV.ViewModels
         {
             if (_monitoringCts != null) return;
             _monitoringCts = new CancellationTokenSource();
-            _ = Task.Run(() => MonitorCpuLoop(_monitoringCts.Token));
-            _ = Task.Run(() => MonitorStateLoop(_monitoringCts.Token));
-            // 独立的缩略图任务，避免阻塞状态同步
-            _ = Task.Run(() => MonitorThumbnailLoop(_monitoringCts.Token));
+            CancellationToken token = _monitoringCts.Token;
+            if (IsRemoteHostActive)
+            {
+                _ = Task.Run(() => MonitorRemoteStateLoop(token));
+                return;
+            }
+            _ = Task.Run(() => MonitorCpuLoop(token));
+            _ = Task.Run(() => MonitorStateLoop(token));
+            _ = Task.Run(() => MonitorThumbnailLoop(token));
+        }
+
+        private async Task MonitorRemoteStateLoop(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    HostVmReadResult<List<VmInstance>> read = await _hostVmOperations.ReadAsync(
+                        (context, cancellation) => _queryService.GetVmListAsync(context, cancellation),
+                        token);
+                    if (read.Status is HostVmOperationStatus.Cancelled or HostVmOperationStatus.Stale) break;
+                    if (!read.Succeeded) throw new InvalidOperationException(read.Message);
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        if (read.Operation is null || !_hostCoordinator.CanApply(read.Operation.Stamp)) return;
+                        ApplyRemoteVmUpdates(read.Value ?? []);
+                    });
+                    await Task.Delay(2000, token);
+                }
+                catch (TaskCanceledException) { break; }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[RemoteMonitorLoop Error] {ex.Message}");
+                    await Task.Delay(3000, token);
+                }
+            }
+        }
+
+        private void ApplyRemoteVmUpdates(IReadOnlyCollection<VmInstance> updates)
+        {
+            HashSet<Guid> updateIds = updates.Select(update => update.Id).ToHashSet();
+            for (int index = VmList.Count - 1; index >= 0; index--)
+            {
+                if (updateIds.Contains(VmList[index].Id)) continue;
+                if (SelectedVm == VmList[index]) SelectedVm = null;
+                VmList.RemoveAt(index);
+            }
+
+            foreach (VmInstance update in updates)
+            {
+                VmInstanceViewModel? vm = VmList.FirstOrDefault(current => current.Id == update.Id);
+                if (vm is null) VmList.Add(CreateVmInstance(update));
+                else vm.Apply(update);
+            }
+            CollectionViewSource.GetDefaultView(VmList)?.Refresh();
+            if (SelectedVm is null) SelectedVm = VmList.FirstOrDefault();
         }
 
         // CPU 使用率监控循环
@@ -738,13 +1059,19 @@ namespace ExHyperV.ViewModels
                 try
                 {
                     // 1. 获取后端最新原始数据
-                    var updates = await _queryService.GetVmListAsync();
+                    HostVmReadResult<List<VmInstance>> read = await _hostVmOperations.ReadAsync(
+                        (context, cancellation) => _queryService.GetVmListAsync(context, cancellation),
+                        token);
+                    if (read.Status is HostVmOperationStatus.Cancelled or HostVmOperationStatus.Stale) break;
+                    if (!read.Succeeded) throw new InvalidOperationException(read.Message);
+                    var updates = read.Value ?? [];
                     var memoryMap = await _queryService.GetVmRuntimeMemoryDataAsync();
 
                     await _queryService.UpdateDiskPerformanceAsync(VmList.Select(v => v.Model));
                     var gpuUsageMap = await _queryService.GetGpuPerformanceAsync(VmList.Select(v => v.Model));
 
                     Application.Current.Dispatcher.Invoke(() => {
+                        if (read.Operation is null || !_hostCoordinator.CanApply(read.Operation.Stamp)) return;
                         bool needsResort = false;
 
                         // --- A. 监测删除：移除本地列表中 已经不存在于后端 的 VM ---
@@ -889,11 +1216,17 @@ namespace ExHyperV.ViewModels
         {
             try
             {
-                var allVms = await _queryService.GetVmListAsync();
-                var freshData = allVms.FirstOrDefault(x => x.Name == vm.Name);
+                HostVmReadResult<List<VmInstance>> read = await _hostVmOperations.ReadAsync(
+                    (context, token) => _queryService.GetVmListAsync(context, token),
+                    _hostGenerationCts.Token);
+                var freshData = read.Succeeded ? read.Value?.FirstOrDefault(x => x.Name == vm.Name) : null;
                 if (freshData != null)
                 {
-                    Application.Current.Dispatcher.Invoke(() => vm.Apply(freshData));
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        if (read.Operation is not null && _hostCoordinator.CanApply(read.Operation.Stamp))
+                            vm.Apply(freshData);
+                    });
                 }
             }
             catch { }

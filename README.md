@@ -75,6 +75,25 @@ cd src
 dotnet build
 ```
 
+## LAN Remote Host Management
+
+Open **Host Connections** to save and manage Hyper-V hosts on the same trusted LAN. The first release uses two independent Windows-native channels:
+
+- **WMI/DCOM** for Hyper-V queries and the supported VM lifecycle operations.
+- **TCP 2179** for the Hyper-V virtual machine console.
+
+Remote host profiles accept literal unicast IPv4 addresses only and are intended for controlled LAN hosts. You can save multiple profiles, but ExHyperV has exactly one active host at a time and always starts on the local computer. Selecting a saved profile only displays it; the active host changes only after a successful diagnostic and explicit connection action.
+
+The default authentication mode uses the current Windows identity without reading a password. Explicit credentials can be used for a connection and, when **Remember credential** is selected, the password is stored only in Windows Credential Manager. Profile files contain the display name, IPv4 address, authentication mode, optional user name, and a credential reference, never the password.
+
+WMI/DCOM and TCP 2179 are diagnosed separately. If management succeeds while TCP 2179 fails, VM management remains available and the console action is disabled with its reason. If an active remote management connection is lost, ExHyperV retains the last snapshot as stale read-only data, blocks writes, and starts capped exponential-backoff reconnection. It does not silently fall back to the local computer.
+
+The optional Chinese configuration wizard is detection-first. It shows the exact proposed changes and performs no mutation until you type the exact Chinese text `确认`. It can add the selected account to the built-in **Hyper-V Administrators** and **Remote Management Users** groups, conditionally enable the local-account token-filter policy, change only selected Public network profiles to Private, enable built-in WMI/Hyper-V firewall rules, and scope TCP 2179 to selected private IPv4 CIDRs. When built-in rules are missing, the wizard restores only the exact preflighted rule names from `SystemDefaults`; it does not use broad groups, wildcards, or a firewall reset. It never creates users, changes passwords, grants `Administrators`, enables WinRM/SSH, or opens TCP 2179 to `Any`. Every applied prefix produces an idempotent reverse-order rollback script, and restored-rule rollback first verifies that rule state and associated filters have not drifted.
+
+Runtime logs and generated rollback scripts are written under `logs` beside `ExHyperV.exe`. `ExHyperV.log` and `ExHyperV.1.log` are UTF-8 without BOM and are each capped at 100 MiB, for approximately 200 MiB of rolling log text; rollback scripts are separate. Sensitive password/token fields are redacted. See [Remote Host Management](doc/remote-host-management.md) for the support matrix, minimum permissions, configuration procedure, and troubleshooting.
+
+The repository also provides a network-disabled-by-default controlled-host runner at `tests/ExHyperV.IntegrationTests`. It only accesses `EXHYPERV_INTEGRATION_HOST` when `EXHYPERV_INTEGRATION_RUN=确认` is set. An optional `EXHYPERV_INTEGRATION_SECOND_HOST` records a real host A → B → A switch and VM read through the second active context. Read-only diagnostics, preflight, the real remote VM list, TCP 2179 console capture, and a structured JSON report run by default; VM writes, an operator-controlled outage, remote configuration, and rollback verification each require their own exact `确认` switch. See [Controlled-host integration acceptance](doc/remote-host-management.md#12-受控宿主集成验收) for every variable and safety boundary.
+
 ## 📖 Technical Documentation
 
 This section will be maintained long-term. It is written based on Hyper-V related documentation and development practices, and may contain inaccuracies.
@@ -541,7 +560,7 @@ Known Compatibility:
 > [!NOTE]
 > Connects to and displays the virtual machine's screen via the RDP protocol, supporting both Basic Session and Enhanced Session modes.
 
-The console window implements RDP connections based on MsRdpEx, connecting directly to the local Hyper-V virtual machine via `127.0.0.1`.
+The console window implements RDP connections based on MsRdpEx. It connects to `localhost:2179` for the local host or to the active remote host's IPv4 address on TCP 2179. Console availability is independent from WMI/DCOM management availability.
 
 #### Session Modes
 

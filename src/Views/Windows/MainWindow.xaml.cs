@@ -1,5 +1,7 @@
-﻿using System.Windows;
+using System.Windows;
 using ExHyperV.Services;
+using ExHyperV.Services.Logging;
+using ExHyperV.Services.Remote.Sessions;
 using ExHyperV.Views;
 using Wpf.Ui.Controls;
 
@@ -7,9 +9,19 @@ namespace ExHyperV.Views
 {
     public partial class MainWindow : FluentWindow
     {
+        private readonly IActiveHostSessionCoordinator _hostCoordinator = ActiveHostSessions.Current;
+
         public MainWindow()
         {
             InitializeComponent();
+            AppLog.BecameUnavailable += OnLoggingBecameUnavailable;
+            _hostCoordinator.StateChanged += OnActiveHostStateChanged;
+            Closed += (_, _) =>
+            {
+                AppLog.BecameUnavailable -= OnLoggingBecameUnavailable;
+                _hostCoordinator.StateChanged -= OnActiveHostStateChanged;
+            };
+            ApplyCapabilities(_hostCoordinator.Current.Capabilities);
             if (App.PerformanceMode)
             {
                 // 无 GPU 模式：关 Mica（省 DWM 合成），改不透明底
@@ -19,9 +31,31 @@ namespace ExHyperV.Views
                 RootNavigation.Transition = Wpf.Ui.Animations.Transition.None;
             }
             Loaded += PagePreload;
+            Loaded += ShowLoggingFailureIfNeeded;
 
             //仅按保存偏好上色;系统主题监听延到 PagePreload 后挂,避开 #146 启动渲染竞争
             SettingsService.ApplySavedTheme();
+        }
+
+        private void ShowLoggingFailureIfNeeded(object sender, RoutedEventArgs e)
+        {
+            Loaded -= ShowLoggingFailureIfNeeded;
+            if (AppLog.IsAvailable || string.IsNullOrWhiteSpace(AppLog.UnavailableReason)) return;
+
+            ShowLoggingFailure(AppLog.UnavailableReason);
+        }
+
+        private void OnLoggingBecameUnavailable(string reason) =>
+            Dispatcher.InvokeAsync(() => ShowLoggingFailure(reason));
+
+        private static void ShowLoggingFailure(string reason)
+        {
+            bool chinese = System.Globalization.CultureInfo.CurrentUICulture.Name.Equals("zh-CN", StringComparison.OrdinalIgnoreCase);
+            Interaction.Notifications.ShowSnackbar(
+                chinese ? "日志不可用" : "Logging unavailable",
+                chinese ? reason : $"ExHyperV cannot write logs. {reason}",
+                ControlAppearance.Caution,
+                SymbolRegular.Warning24);
         }
 
         private void PagePreload(object sender, RoutedEventArgs e)
@@ -41,6 +75,27 @@ namespace ExHyperV.Views
             Dispatcher.BeginInvoke(
                 new Action(() => SettingsService.EnableSystemThemeWatch(this)),
                 System.Windows.Threading.DispatcherPriority.Background);
+        }
+
+        private void OnActiveHostStateChanged(object? sender, ActiveHostStateChangedEventArgs e) =>
+            Dispatcher.InvokeAsync(() => ApplyCapabilities(e.Current.Capabilities));
+
+        private void ApplyCapabilities(HostCapabilityMatrix capabilities)
+        {
+            ApplyNavigationCapability(VmNavigationItem, capabilities[HostCapabilityKind.VmRead]);
+            ApplyNavigationCapability(HostNavigationItem, capabilities[HostCapabilityKind.HostHardware]);
+            ApplyNavigationCapability(PcieNavigationItem, capabilities[HostCapabilityKind.PcieDevices]);
+            ApplyNavigationCapability(SwitchNavigationItem, capabilities[HostCapabilityKind.VirtualSwitch]);
+            ApplyNavigationCapability(UsbNavigationItem, capabilities[HostCapabilityKind.UsbPassthrough]);
+        }
+
+        private static void ApplyNavigationCapability(
+            NavigationViewItem item,
+            HostCapability capability)
+        {
+            item.IsEnabled = capability.CanView;
+            item.ToolTip = capability.CanExecute ? null : capability.Reason;
+            System.Windows.Controls.ToolTipService.SetShowOnDisabled(item, true);
         }
 
 

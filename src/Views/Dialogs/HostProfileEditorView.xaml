@@ -1,0 +1,50 @@
+<UserControl x:Class="ExHyperV.Views.HostProfileEditorView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+             MinWidth="430">
+    <StackPanel>
+        <TextBlock Text="通过 WMI/DCOM 管理远程 Hyper-V，并使用 TCP 2179 打开控制台。"
+                   TextWrapping="Wrap"
+                   Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"
+                   Margin="0,0,0,16"/>
+
+        <TextBlock Text="配置名称" Margin="0,0,0,6"/>
+        <ui:TextBox Text="{Binding DisplayName, UpdateSourceTrigger=PropertyChanged}"
+                    PlaceholderText="例如：LAB-HV-06" Margin="0,0,0,12"/>
+
+        <TextBlock Text="IPv4 地址" Margin="0,0,0,6"/>
+        <ui:TextBox Text="{Binding Address, UpdateSourceTrigger=PropertyChanged}"
+                    PlaceholderText="例如：10.0.0.6" Margin="0,0,0,16"/>
+
+        <TextBlock Text="连接身份" FontWeight="SemiBold" Margin="0,0,0,8"/>
+        <RadioButton Content="当前 Windows 身份"
+                     GroupName="AuthenticationMode"
+                     IsChecked="{Binding AuthenticationMode, Mode=TwoWay, Converter={StaticResource EqualityConverter}, ConverterParameter=CurrentWindowsIdentity}"
+                     Margin="0,0,0,8"/>
+        <RadioButton Content="指定其他凭据"
+                     GroupName="AuthenticationMode"
+                     IsChecked="{Binding AuthenticationMode, Mode=TwoWay, Converter={StaticResource EqualityConverter}, ConverterParameter=ExplicitCredential}"
+                     Margin="0,0,0,10"/>
+
+        <StackPanel IsEnabled="{Binding UsesExplicitCredential}">
+            <TextBlock Text="用户名" Margin="0,0,0,6"/>
+            <ui:TextBox Text="{Binding UserName, UpdateSourceTrigger=PropertyChanged}"
+                        PlaceholderText="主机名\账户 或 域\账户" Margin="0,0,0,10"/>
+
+            <TextBlock Text="密码" Margin="0,0,0,6"/>
+            <ui:PasswordBox Password="{Binding Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                            Margin="0,0,0,6"/>
+            <TextBlock Text="{Binding PasswordHint}" FontSize="12" TextWrapping="Wrap"
+                       Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}" Margin="0,0,0,10"/>
+            <CheckBox IsChecked="{Binding RememberCredential}" Content="记住凭据（保存到 Windows 凭据管理器）"/>
+        </StackPanel>
+
+        <Border Background="{ui:ThemeResource SystemFillColorCriticalBackgroundBrush}"
+                CornerRadius="4" Padding="10" Margin="0,14,0,0"
+                Visibility="{Binding ErrorMessage, Converter={StaticResource StringToVisibilityConverter}}">
+            <TextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap"
+                       Foreground="{ui:ThemeResource SystemFillColorCriticalBrush}"/>
+        </Border>
+    </StackPanel>
+</UserControl>

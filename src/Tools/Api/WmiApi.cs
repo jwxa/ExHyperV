@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Management;
 
 namespace ExHyperV.Tools;
@@ -11,6 +11,7 @@ public static class WmiScope
 {
     public const string HyperV = @"root\virtualization\v2";
     public const string CimV2 = @"root\cimv2";
+    public const string Default = @"root\default";
     public const string Storage = @"Root\Microsoft\Windows\Storage";
     public const string StdCimV2 = @"root\StandardCimv2";
     public const string Wmi = @"root\wmi";
@@ -25,32 +26,51 @@ public static class WmiScope
 // ══════════════════════════════════════════════════════════════════
 public sealed class WmiContext
 {
-    public static readonly WmiContext Local = new();
+    private int _invalidated;
+
+    public static readonly WmiContext Local = new(".", null, null, "local");
 
     public string Host { get; }
     public string? Username { get; }
     public string? Password { get; }
+    public string IdentityContextId { get; }
+    public TimeSpan? OperationTimeout { get; }
     public bool IsLocal => Host == ".";
+    public bool UsesCurrentWindowsIdentity => !IsLocal && Username is null;
+    internal bool IsInvalidated => Volatile.Read(ref _invalidated) != 0;
 
-    private WmiContext()
-    {
-        Host = ".";
-    }
+    public static WmiContext Remote(
+        string host,
+        string username,
+        string password,
+        TimeSpan? operationTimeout = null) =>
+        new(host, username, password, Guid.NewGuid().ToString("N"), operationTimeout ?? TimeSpan.FromSeconds(8));
 
-    public static WmiContext Remote(string host, string username, string password) =>
-        new(host, username, password);
+    public static WmiContext RemoteCurrentWindowsIdentity(
+        string host,
+        TimeSpan? operationTimeout = null) =>
+        new(host, null, null, Guid.NewGuid().ToString("N"), operationTimeout ?? TimeSpan.FromSeconds(8));
 
-    private WmiContext(string host, string username, string password)
+    private WmiContext(
+        string host,
+        string? username,
+        string? password,
+        string identityContextId,
+        TimeSpan? operationTimeout = null)
     {
         Host = host;
         Username = username;
         Password = password;
+        IdentityContextId = identityContextId;
+        OperationTimeout = operationTimeout;
     }
+
+    internal void Invalidate() => Interlocked.Exchange(ref _invalidated, 1);
 }
 
 // ══════════════════════════════════════════════════════════════════
 //  连接缓存 — 内部使用
-//  按 (scope, host) 缓存 ManagementScope
+//  按 (scope, host, identity-context) 缓存 ManagementScope
 // ══════════════════════════════════════════════════════════════════
 internal static class WmiConnectionCache
 {
@@ -62,45 +82,87 @@ internal static class WmiConnectionCache
 
     public static ManagementScope GetManagementScope(string scope, WmiContext ctx)
     {
-        string key = $"{ctx.Host}|{scope}";
+        string key = CacheKey(scope, ctx);
+        ManagementScope? cached = null;
         lock (_mgmtLock)
         {
-            if (_mgmtCache.TryGetValue(key, out var cached) && cached.IsConnected)
+            ObjectDisposedException.ThrowIf(ctx.IsInvalidated, ctx);
+            if (_mgmtCache.TryGetValue(key, out cached) && cached.IsConnected)
             {
                 if (_mgmtLastChecked.TryGetValue(key, out var lastChecked) &&
                     DateTime.Now - lastChecked < HealthCheckInterval)
                 {
                     return cached;
                 }
+            }
+            else
+            {
+                cached = null;
+            }
+        }
 
-                try
+        if (cached is not null)
+        {
+            try
+            {
+                using var searcher = WmiApi.CreateSearcher(
+                    cached,
+                    "SELECT Name FROM __Namespace WHERE Name='_health_check_'",
+                    ctx);
+                searcher.Get();
+                lock (_mgmtLock)
                 {
-                    using var searcher = new ManagementObjectSearcher(cached,
-                        new ObjectQuery("SELECT Name FROM __Namespace WHERE Name='_health_check_'"));
-                    searcher.Get();
-                    _mgmtLastChecked[key] = DateTime.Now;
-                    return cached;
-                }
-                catch
-                {
-                    _mgmtCache.Remove(key);
-                    _mgmtLastChecked.Remove(key);
+                    ObjectDisposedException.ThrowIf(ctx.IsInvalidated, ctx);
+                    if (_mgmtCache.TryGetValue(key, out ManagementScope? current)
+                        && ReferenceEquals(current, cached))
+                    {
+                        _mgmtLastChecked[key] = DateTime.Now;
+                        return cached;
+                    }
                 }
             }
+            catch (ObjectDisposedException) when (ctx.IsInvalidated)
+            {
+                throw;
+            }
+            catch
+            {
+                lock (_mgmtLock)
+                {
+                    if (_mgmtCache.TryGetValue(key, out ManagementScope? current)
+                        && ReferenceEquals(current, cached))
+                    {
+                        _mgmtCache.Remove(key);
+                        _mgmtLastChecked.Remove(key);
+                    }
+                }
+            }
+        }
 
-            string path = ctx.IsLocal
-                ? $@"\\.\{scope}"
-                : $@"\\{ctx.Host}\{scope}";
-
-            var options = new ConnectionOptions();
-            if (!ctx.IsLocal)
+        string path = ctx.IsLocal
+            ? $@"\\.\{scope}"
+            : $@"\\{ctx.Host}\{scope}";
+        var options = new ConnectionOptions();
+        if (!ctx.IsLocal)
+        {
+            options.Authentication = AuthenticationLevel.PacketPrivacy;
+            options.Impersonation = ImpersonationLevel.Impersonate;
+            options.EnablePrivileges = true;
+            if (ctx.OperationTimeout is { } timeout) options.Timeout = timeout;
+            if (!ctx.UsesCurrentWindowsIdentity)
             {
                 options.Username = ctx.Username;
                 options.Password = ctx.Password;
             }
+        }
 
-            var ms = new ManagementScope(path, options);
-            ms.Connect();
+        var ms = new ManagementScope(path, options);
+        ms.Connect();
+        lock (_mgmtLock)
+        {
+            ObjectDisposedException.ThrowIf(ctx.IsInvalidated, ctx);
+            if (_mgmtCache.TryGetValue(key, out ManagementScope? current) && current.IsConnected)
+                return current;
             _mgmtCache[key] = ms;
             _mgmtLastChecked[key] = DateTime.Now;
             return ms;
@@ -115,6 +177,23 @@ internal static class WmiConnectionCache
             _mgmtLastChecked.Clear();
         }
     }
+
+    public static void Clear(WmiContext context)
+    {
+        string prefix = $"{context.IdentityContextId}|";
+        lock (_mgmtLock)
+        {
+            context.Invalidate();
+            foreach (string key in _mgmtCache.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)).ToArray())
+            {
+                _mgmtCache.Remove(key);
+                _mgmtLastChecked.Remove(key);
+            }
+        }
+    }
+
+    private static string CacheKey(string scope, WmiContext context) =>
+        $"{context.IdentityContextId}|{context.Host}|{scope}";
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -133,7 +212,8 @@ public static class WmiApi
         string wql,
         Func<ManagementObject, T> mapper,
         string scope = WmiScope.HyperV,
-        WmiContext? ctx = null)
+        WmiContext? ctx = null,
+        IReadOnlyDictionary<string, object>? operationContext = null)
     {
         ctx ??= WmiContext.Local;
 
@@ -144,7 +224,7 @@ public static class WmiApi
                 var ms = WmiConnectionCache.GetManagementScope(scope, ctx);
                 var list = new List<T>();
 
-                using var searcher = new ManagementObjectSearcher(ms, new ObjectQuery(wql));
+                using var searcher = CreateSearcher(ms, wql, ctx, operationContext);
                 using var collection = searcher.Get();
 
                 foreach (ManagementBaseObject baseObj in collection)
@@ -246,7 +326,7 @@ public static class WmiApi
             {
                 var ms = WmiConnectionCache.GetManagementScope(scope, ctx);
 
-                using var searcher = new ManagementObjectSearcher(ms, new ObjectQuery(wql));
+                using var searcher = CreateSearcher(ms, wql, ctx);
                 using var collection = searcher.Get();
                 using var target = collection.Cast<ManagementObject>().FirstOrDefault();
 
@@ -287,7 +367,7 @@ public static class WmiApi
             {
                 var ms = WmiConnectionCache.GetManagementScope(scope, ctx);
 
-                using var searcher = new ManagementObjectSearcher(ms, new ObjectQuery(wql));
+                using var searcher = CreateSearcher(ms, wql, ctx);
                 using var collection = searcher.Get();
                 using var target = collection.Cast<ManagementObject>().FirstOrDefault();
 
@@ -297,7 +377,10 @@ public static class WmiApi
                 using var inParams = target.GetMethodParameters(methodName);
                 setParams?.Invoke(inParams);
 
-                using var outParams = target.InvokeMethod(methodName, inParams, null);
+                using var outParams = target.InvokeMethod(
+                    methodName,
+                    inParams,
+                    CreateInvokeMethodOptions(ctx));
                 if (outParams is null)
                     return ApiResponse<string[]>.Fail($"Method '{methodName}' returned null");
 
@@ -313,7 +396,7 @@ public static class WmiApi
 
                     // 异步 Job 路径下 outParams 的结果字段不填充(实测立即读/Job 完成后读均为 null)，
                     // 结果须从 Job 的 Msvm_AffectedJobElement 关联取——与微软管理库同款取法。
-                    return ApiResponse<string[]>.Ok(QueryJobAffectedPaths(ms, jobPath, resultField));
+                    return ApiResponse<string[]>.Ok(QueryJobAffectedPaths(ms, jobPath, resultField, ctx));
                 }
                 if (returnValue != 0)
                 {
@@ -360,7 +443,10 @@ public static class WmiApi
                 using var inParams = target.GetMethodParameters(methodName);
                 setParams?.Invoke(inParams);
 
-                using var outParams = target.InvokeMethod(methodName, inParams, null);
+                using var outParams = target.InvokeMethod(
+                    methodName,
+                    inParams,
+                    CreateInvokeMethodOptions(ctx));
                 if (outParams is null)
                     return ApiResponse.Fail($"Method '{methodName}' returned null");
 
@@ -396,11 +482,12 @@ public static class WmiApi
         string methodName,
         Action<ManagementBaseObject>? setParams = null,
         string scope = WmiScope.HyperV,
-        WmiContext? ctx = null)
+        WmiContext? ctx = null,
+        CancellationToken cancellationToken = default)
     {
         ctx ??= WmiContext.Local;
 
-        return Task.Run(async () =>
+        Task<ApiResponse<ManagementBaseObject>> operation = Task.Run(async () =>
         {
             try
             {
@@ -409,7 +496,10 @@ public static class WmiApi
                 using var inParams = cls.GetMethodParameters(methodName);
                 setParams?.Invoke(inParams);
 
-                var outParams = cls.InvokeMethod(methodName, inParams, null);
+                var outParams = cls.InvokeMethod(
+                    methodName,
+                    inParams,
+                    CreateInvokeMethodOptions(ctx));
                 if (outParams is null)
                     return ApiResponse<ManagementBaseObject>.Fail($"Method '{methodName}' returned null");
 
@@ -419,7 +509,8 @@ public static class WmiApi
                     int returnValue = Convert.ToInt32(outParams["ReturnValue"]);
                     if (returnValue == 4096)   // 异步 Job：等完成（与 InvokeOnObjectAsync 一致）
                     {
-                        var jobResult = await WaitForJobAsync((string)outParams["Job"], scope, ctx, default);
+                        var jobResult = await WaitForJobAsync(
+                            (string)outParams["Job"], scope, ctx, cancellationToken);
                         if (!jobResult.Success)
                         {
                             outParams.Dispose();
@@ -443,6 +534,10 @@ public static class WmiApi
                     throw;
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (ManagementException ex)
             {
                 return ApiResponse<ManagementBaseObject>.Fail(
@@ -453,6 +548,8 @@ public static class WmiApi
                 return ApiResponse<ManagementBaseObject>.Fail(ex.Message, -1, ApiErrorSource.None, ex);
             }
         });
+
+        return AwaitOwnedResponseAsync(operation, ctx, cancellationToken);
     }
 
     /// <summary>
@@ -491,7 +588,7 @@ public static class WmiApi
             {
                 var ms = WmiConnectionCache.GetManagementScope(scope, ctx);
 
-                using var searcher = new ManagementObjectSearcher(ms, new ObjectQuery(wql));
+                using var searcher = CreateSearcher(ms, wql, ctx);
                 using var collection = searcher.Get();
                 using var obj = collection.Cast<ManagementObject>().FirstOrDefault();
 
@@ -501,7 +598,7 @@ public static class WmiApi
                 modifier(obj);
                 string xml = obj.GetText(TextFormat.CimDtd20);
 
-                using var svcSearcher = new ManagementObjectSearcher(ms, new ObjectQuery(serviceWql));
+                using var svcSearcher = CreateSearcher(ms, serviceWql, ctx);
                 using var svcCollection = svcSearcher.Get();
                 using var service = svcCollection.Cast<ManagementObject>().FirstOrDefault();
 
@@ -543,6 +640,7 @@ public static class WmiApi
         string scope = WmiScope.HyperV,
         WmiContext? ctx = null)
     {
+        ctx ??= WmiContext.Local;
         return Task.Run(() =>
         {
             try
@@ -552,7 +650,8 @@ public static class WmiApi
                 using var related = source.GetRelated(
                     relatedClass,
                     associationClass,
-                    null, null, null, null, false, null);
+                    null, null, null, null, false,
+                    CreateEnumerationOptions(ctx));
 
                 foreach (var baseObj in related)
                 {
@@ -609,6 +708,7 @@ public static class WmiApi
         string scope = WmiScope.HyperV,
         WmiContext? ctx = null)
     {
+        ctx ??= WmiContext.Local;
         return Task.Run(() =>
         {
             try
@@ -621,7 +721,7 @@ public static class WmiApi
                     null, null,
                     resultRole,    // 第5个参数传 resultRole（实测确认）
                     sourceRole,    // 第6个参数传 sourceRole（实测确认）
-                    false, null);
+                    false, CreateEnumerationOptions(ctx));
 
                 foreach (var baseObj in related)
                 {
@@ -667,7 +767,7 @@ public static class WmiApi
             try
             {
                 var ms = WmiConnectionCache.GetManagementScope(scope, ctx);
-                using var searcher = new ManagementObjectSearcher(ms, new ObjectQuery(wql));
+                using var searcher = CreateSearcher(ms, wql, ctx);
                 using var collection = searcher.Get();
                 using var obj = collection.Cast<ManagementObject>().FirstOrDefault();
                 if (obj is null) return ApiResponse<T>.Empty();
@@ -704,7 +804,10 @@ public static class WmiApi
             try
             {
                 var ms = WmiConnectionCache.GetManagementScope(scope, ctx);
-                using var obj = new ManagementObject(ms, new ManagementPath(objectPath), null);
+                using var obj = new ManagementObject(
+                    ms,
+                    new ManagementPath(objectPath),
+                    CreateObjectGetOptions(ctx));
                 obj.Get();
                 return ApiResponse<T>.Ok(mapper(obj));
             }
@@ -736,8 +839,10 @@ public static class WmiApi
     {
         ctx ??= WmiContext.Local;
         var ms = WmiConnectionCache.GetManagementScope(scope, ctx);
-        using var searcher = new ManagementObjectSearcher(
-            ms, new ObjectQuery("SELECT * FROM Msvm_VirtualSystemManagementService"));
+        using var searcher = CreateSearcher(
+            ms,
+            "SELECT * FROM Msvm_VirtualSystemManagementService",
+            ctx);
         using var col = searcher.Get();
         return col.Cast<ManagementObject>().First();
     }
@@ -754,9 +859,10 @@ public static class WmiApi
         ctx ??= WmiContext.Local;
         var ms = WmiConnectionCache.GetManagementScope(scope, ctx);
         string safe = Escape(vmName);
-        using var searcher = new ManagementObjectSearcher(
-            ms, new ObjectQuery(
-                $"SELECT * FROM Msvm_ComputerSystem WHERE ElementName = '{safe}'"));
+        using var searcher = CreateSearcher(
+            ms,
+            $"SELECT * FROM Msvm_ComputerSystem WHERE ElementName = '{safe}'",
+            ctx);
         using var col = searcher.Get();
         return col.Cast<ManagementObject>().FirstOrDefault();
     }
@@ -801,6 +907,87 @@ public static class WmiApi
     /// <summary>清理所有连接缓存（进程退出或测试时使用）。</summary>
     public static void ClearConnectionCache() => WmiConnectionCache.Clear();
 
+    internal static InvokeMethodOptions? CreateInvokeMethodOptions(WmiContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.OperationTimeout is { } timeout
+            ? new InvokeMethodOptions { Timeout = timeout }
+            : null;
+    }
+
+    internal static System.Management.EnumerationOptions? CreateEnumerationOptions(
+        WmiContext context,
+        IReadOnlyDictionary<string, object>? operationContext = null)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (context.OperationTimeout is null && operationContext is null or { Count: 0 }) return null;
+
+        var options = new System.Management.EnumerationOptions { ReturnImmediately = false };
+        if (context.OperationTimeout is { } timeout) options.Timeout = timeout;
+        if (operationContext is not null)
+        {
+            foreach ((string key, object value) in operationContext)
+            {
+                ArgumentException.ThrowIfNullOrWhiteSpace(key);
+                ArgumentNullException.ThrowIfNull(value);
+                options.Context.Add(key, value);
+            }
+        }
+        return options;
+    }
+
+    internal static ObjectGetOptions? CreateObjectGetOptions(WmiContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.OperationTimeout is { } timeout
+            ? new ObjectGetOptions(null, timeout, useAmendedQualifiers: false)
+            : null;
+    }
+
+    private static async Task<ApiResponse<ManagementBaseObject>> AwaitOwnedResponseAsync(
+        Task<ApiResponse<ManagementBaseObject>> operation,
+        WmiContext context,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await operation.WaitAsync(cancellationToken);
+        }
+        catch
+        {
+            _ = DisposeOwnedResponseWhenCompleteAsync(operation);
+            throw;
+        }
+    }
+
+    private static async Task DisposeOwnedResponseWhenCompleteAsync(
+        Task<ApiResponse<ManagementBaseObject>> operation)
+    {
+        try
+        {
+            ApiResponse<ManagementBaseObject> response = await operation;
+            response.Data?.Dispose();
+        }
+        catch
+        {
+        }
+    }
+
+    internal static ManagementObjectSearcher CreateSearcher(
+        ManagementScope scope,
+        string wql,
+        WmiContext context,
+        IReadOnlyDictionary<string, object>? operationContext = null)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentException.ThrowIfNullOrWhiteSpace(wql);
+        ArgumentNullException.ThrowIfNull(context);
+        System.Management.EnumerationOptions? options = CreateEnumerationOptions(context, operationContext);
+        return options is null
+            ? new ManagementObjectSearcher(scope, new ObjectQuery(wql))
+            : new ManagementObjectSearcher(scope, new ObjectQuery(wql), options);
+    }
+
     // ── 内部：异步 Job 等待与结果获取 ─────────────────────────────
 
     /// <summary>
@@ -808,12 +995,18 @@ public static class WmiApi
     /// 关联里混着 Msvm_ComputerSystem 与各类设置对象：ResultingSystem 取前者，其余(如
     /// ResultingResourceSettings)取后者。
     /// </summary>
-    private static string[] QueryJobAffectedPaths(ManagementScope ms, string jobPath, string resultField)
+    private static string[] QueryJobAffectedPaths(
+        ManagementScope ms,
+        string jobPath,
+        string resultField,
+        WmiContext context)
     {
         int colon = jobPath.IndexOf(":Msvm_", StringComparison.OrdinalIgnoreCase);
         string rel = colon >= 0 ? jobPath.Substring(colon + 1) : jobPath;
-        using var searcher = new ManagementObjectSearcher(ms, new ObjectQuery(
-            $"ASSOCIATORS OF {{{rel}}} WHERE AssocClass=Msvm_AffectedJobElement"));
+        using var searcher = CreateSearcher(
+            ms,
+            $"ASSOCIATORS OF {{{rel}}} WHERE AssocClass=Msvm_AffectedJobElement",
+            context);
         using var col = searcher.Get();
         var systems = new List<string>();
         var others = new List<string>();
@@ -846,7 +1039,10 @@ public static class WmiApi
         try
         {
             var ms = WmiConnectionCache.GetManagementScope(scope, ctx);
-            using var job = new ManagementObject(ms, new ManagementPath(jobPath), null);
+            using var job = new ManagementObject(
+                ms,
+                new ManagementPath(jobPath),
+                CreateObjectGetOptions(ctx));
 
             while (!linkedCts.Token.IsCancellationRequested)
             {

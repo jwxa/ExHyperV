@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference
+      Include="..\..\src\ExHyperV.csproj"
+      AdditionalProperties="CustomAfterMicrosoftCommonTargets=$(MSBuildThisFileDirectory)..\..\.codex-tasks\remote-host-management\raw\validate-with-generated-com.targets" />
+  </ItemGroup>
+</Project>

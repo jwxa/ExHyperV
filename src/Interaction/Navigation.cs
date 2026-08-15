@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Windows;
 using ExHyperV.Views;
+using ExHyperV.Services.Remote.Consoles;
 
 namespace ExHyperV.Interaction
 {
@@ -22,9 +23,10 @@ namespace ExHyperV.Interaction
         private static readonly Dictionary<string, ConsoleWindow> _consoles = new();
 
         /// <summary>打开虚拟机沉浸式控制台窗口；若该 VM 已有窗口则前置，不新开。</summary>
-        public static void OpenConsoleWindow(string vmId, string vmName)
+        public static void OpenConsoleWindow(ActiveHostConsoleSession session)
         {
-            if (_consoles.TryGetValue(vmId, out var existing))
+            ArgumentNullException.ThrowIfNull(session);
+            if (_consoles.TryGetValue(session.WindowKey, out var existing))
             {
                 if (existing.WindowState == WindowState.Minimized)
                     existing.WindowState = WindowState.Normal;
@@ -32,9 +34,9 @@ namespace ExHyperV.Interaction
                 return;
             }
 
-            var window = new ConsoleWindow(vmId, vmName);
-            _consoles[vmId] = window;
-            window.Closed += (_, _) => _consoles.Remove(vmId);
+            var window = new ConsoleWindow(session);
+            _consoles[session.WindowKey] = window;
+            window.Closed += (_, _) => _consoles.Remove(session.WindowKey);
             window.Show();
         }
     }

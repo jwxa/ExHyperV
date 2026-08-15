@@ -73,6 +73,25 @@ cd src
 dotnet build
 ```
 
+## 局域网远程宿主管理
+
+打开 **主机连接** 页面，可以保存和管理同一可信局域网内的 Hyper-V 宿主。第一版使用两条相互独立的 Windows 原生通道：
+
+- **WMI/DCOM**：查询 Hyper-V，并执行当前支持的虚拟机生命周期操作。
+- **TCP 2179**：连接 Hyper-V 虚拟机控制台。
+
+远程配置仅接受单播 IPv4 字面地址，用于受控局域网宿主。可以保存多台宿主，但 ExHyperV 同一时刻只有一台活动宿主，并且每次启动都从本地计算机开始。选中配置只会显示详情；只有检测成功并由用户明确执行连接后，活动宿主才会改变。
+
+默认身份模式直接使用当前 Windows 身份，不读取密码。也可以临时输入显式凭据；只有选中 **记住凭据** 时，密码才会保存到 Windows 凭据管理器。配置文件仅包含显示名称、IPv4 地址、身份模式、可选用户名和凭据引用，不包含密码。
+
+WMI/DCOM 与 TCP 2179 分别检测。当管理通道成功而 TCP 2179 失败时，虚拟机管理仍可使用，控制台操作会置灰并显示原因。活动远程管理连接中断后，ExHyperV 会保留断线前快照并标记为只读旧数据、禁止写入，同时按有上限的指数退避自动重连；不会静默切回本机。
+
+可选的中文配置向导遵循“先检测、再确认”。向导会展示精确修改清单，只有输入完全一致的中文 `确认` 才会执行。它可以将所选账户加入内置 **Hyper-V Administrators** 和 **Remote Management Users** 组、按条件启用本地账户令牌筛选策略、仅把用户选中的 Public 网络改为 Private、启用 Windows 内置 WMI/Hyper-V 防火墙规则，并把 TCP 2179 限制到用户选择的私有 IPv4 CIDR。目标机缺少内置规则时，向导只会按 `SystemDefaults` 中预检到的精确规则名逐条恢复，不使用规则组、通配符或整库重置。向导不会创建用户、修改密码、授予 `Administrators`、启用 WinRM/SSH，也不会把 TCP 2179 开放到 `Any`。每个已执行前缀都会生成反向、幂等的回滚脚本；恢复规则的回滚会先验证规则及关联过滤器未发生漂移。
+
+运行日志和生成的回滚脚本位于 `ExHyperV.exe` 同目录的 `logs` 文件夹。`ExHyperV.log` 和 `ExHyperV.1.log` 使用无 BOM 的 UTF-8 编码，每个文件上限 100 MiB，滚动日志正文总量约 200 MiB；回滚脚本单独计算。密码、令牌等敏感字段会被脱敏。支持矩阵、最小权限、配置步骤和故障排查见[远程宿主管理文档](doc/remote-host-management.md)。
+
+仓库还提供默认不联网的受控宿主验收运行器：`tests/ExHyperV.IntegrationTests`。只有设置 `EXHYPERV_INTEGRATION_RUN=确认` 才会访问 `EXHYPERV_INTEGRATION_HOST`；可选的 `EXHYPERV_INTEGRATION_SECOND_HOST` 会记录真实的宿主 A → B → A 往返切换及第二宿主活动上下文 VM 读取。运行器还会输出两通道诊断、只读预检、真实远程 VM 列表、TCP 2179 控制台捕获和结构化 JSON 报告。VM 写入、人工断线、远程配置和回滚复检分别使用独立的 `确认` 开关，完整变量和执行边界见[远程宿主管理文档](doc/remote-host-management.md#12-受控宿主集成验收)。
+
 ## 📖 技术文档
 
 这部分内容将长期维护，根据 HyperV 相关文档以及开发实践编写而成，可能会存在问题。
@@ -533,7 +552,7 @@ $n="CheckMMIO_$(Get-Random)";New-VM $n -Gen 2 -NoVHD|Out-Null;Set-VM $n -Automat
 > [!NOTE]
 > 通过 RDP 协议连接并显示虚拟机画面，支持基本会话与增强会话两种模式。
 
-控制台窗口基于 MsRdpEx 实现 RDP 连接，直接通过 `127.0.0.1` 对本机 Hyper-V 虚拟机发起连接。
+控制台窗口基于 MsRdpEx 实现 RDP 连接。本地宿主连接 `localhost:2179`，远程宿主连接当前活动宿主 IPv4 地址的 TCP 2179；控制台是否可用与 WMI/DCOM 管理通道是否可用相互独立。
 
 #### 会话模式
 

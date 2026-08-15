@@ -1,10 +1,11 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Models;
 using ExHyperV.Services;
 using ExHyperV.Interaction;
 using ExHyperV.Views;
+using ExHyperV.Services.Remote.Sessions;
 
 namespace ExHyperV.ViewModels
 {
@@ -25,7 +26,8 @@ namespace ExHyperV.ViewModels
 
         public SwitchPageViewModel()
         {
-            LoadNetworkInfoCommand.Execute(null);
+            if (HasHostCapability(HostCapabilityKind.VirtualSwitch))
+                LoadNetworkInfoCommand.Execute(null);
         }
 
         // ===== 命令 =====
@@ -33,6 +35,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task AddNewSwitchAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VirtualSwitch)) return;
             _bridgeableAdapters = await HyperVSwitchService.GetBridgeableAdaptersAsync();
             var addSwitchVm = new AddSwitchViewModel(Switches, _physicalAdapters, _bridgeableAdapters);
             var addSwitchView = new AddSwitchView
@@ -49,9 +52,12 @@ namespace ExHyperV.ViewModels
 
             if (addSwitchVm.Validate())
             {
+                if (!TryBeginHostWrite(HostCapabilityKind.VirtualSwitch, out IHostWriteLease? writeLease)) return;
                 IsBusy = true;
                 try
                 {
+                    using (writeLease)
+                    {
                     var typeForService = addSwitchVm.SelectedSwitchType;
 
                     await HyperVSwitchService.CreateSwitchAsync(
@@ -61,6 +67,7 @@ namespace ExHyperV.ViewModels
                     );
 
                     await CoreRefreshLogicAsync();
+                    }
                 }
                 catch (System.Exception ex)
                 {
@@ -79,16 +86,21 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task DeleteSwitchAsync(SwitchViewModel? switchToDelete)
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VirtualSwitch)) return;
             if (switchToDelete == null || switchToDelete.IsDefaultSwitch)
             {
                 return;
             }
+            if (!TryBeginHostWrite(HostCapabilityKind.VirtualSwitch, out IHostWriteLease? writeLease)) return;
 
             IsBusy = true;
             try
             {
-                await HyperVSwitchService.DeleteSwitchAsync(switchToDelete.SwitchName);
-                await CoreRefreshLogicAsync();
+                using (writeLease)
+                {
+                    await HyperVSwitchService.DeleteSwitchAsync(switchToDelete.SwitchName);
+                    await CoreRefreshLogicAsync();
+                }
             }
             catch (System.Exception ex)
             {
@@ -104,6 +116,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task LoadNetworkInfoAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VirtualSwitch)) return;
             if (IsBusy) return;
 
             IsBusy = true;
@@ -158,6 +171,7 @@ namespace ExHyperV.ViewModels
 
         private async void OnSwitchViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VirtualSwitch)) return;
             if (sender is not SwitchViewModel changedSwitch) return;
 
             if (changedSwitch.IsReverting || changedSwitch.IsLockedForInteraction) return;
@@ -209,10 +223,17 @@ namespace ExHyperV.ViewModels
             {
                 return;
             }
+            if (!TryBeginHostWrite(HostCapabilityKind.VirtualSwitch, out IHostWriteLease? writeLease))
+            {
+                await changedSwitch.RevertTo(originalSwitchInfo);
+                return;
+            }
 
             IsBusy = true;
             try
             {
+                using (writeLease)
+                {
                 await HyperVSwitchService.UpdateSwitchConfigurationAsync(
                     changedSwitch.SwitchName,
                     changedSwitch.SelectedNetworkMode,
@@ -222,6 +243,7 @@ namespace ExHyperV.ViewModels
 
                 await RefreshDataModels();
                 UpdateAllSwitchMenus();
+                }
             }
             catch (Exception ex)
             {

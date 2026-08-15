@@ -1,10 +1,11 @@
-﻿using System.Windows;
+using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using Wpf.Ui.Controls;
 using TextBlock = Wpf.Ui.Controls.TextBlock;
 
 using ExHyperV.Views;
+using ExHyperV.ViewModels;
 namespace ExHyperV.Interaction
 {
     public static class Dialogs
@@ -168,7 +169,10 @@ namespace ExHyperV.Interaction
             await dialog.ShowAsync(CancellationToken.None);
         }
 
-        public static async Task<bool> ShowContentDialogAsync(string title, UserControl content)
+        public static async Task<bool> ShowContentDialogAsync(
+            string title,
+            UserControl content,
+            string? primaryButtonText = null)
         {
             if (Application.Current.MainWindow is not MainWindow mainWindow)
             {
@@ -185,7 +189,7 @@ namespace ExHyperV.Interaction
             {
                 Title = title,
                 Content = content,
-                PrimaryButtonText = Properties.Resources.Btn_Create,
+                PrimaryButtonText = primaryButtonText ?? Properties.Resources.Btn_Create,
                 CloseButtonText = Properties.Resources.Btn_Cancel,
                 DialogHostEx = dialogHost,
                 VerticalContentAlignment = VerticalAlignment.Top
@@ -194,6 +198,37 @@ namespace ExHyperV.Interaction
             var result = await dialog.ShowAsync(CancellationToken.None);
 
             return result == ContentDialogResult.Primary;
+        }
+
+        public static async Task<bool> ShowHostConfigurationConfirmationAsync(
+            HostConfigurationDialogViewModel viewModel)
+        {
+            ArgumentNullException.ThrowIfNull(viewModel);
+            if (Application.Current.MainWindow is not MainWindow mainWindow
+                || mainWindow.ContentPresenterForDialogs is not { } dialogHost)
+                return false;
+
+            var content = new HostConfigurationDialogView { DataContext = viewModel };
+            var dialog = new ContentDialog
+            {
+                Title = "确认远程主机配置",
+                Content = content,
+                PrimaryButtonText = "应用修改",
+                CloseButtonText = "取消",
+                PrimaryButtonAppearance = ControlAppearance.Danger,
+                DialogHostEx = dialogHost,
+                VerticalContentAlignment = VerticalAlignment.Top
+            };
+            dialog.SetBinding(
+                ContentDialog.IsPrimaryButtonEnabledProperty,
+                new System.Windows.Data.Binding(nameof(HostConfigurationDialogViewModel.IsConfirmationExact))
+                {
+                    Source = viewModel,
+                    Mode = System.Windows.Data.BindingMode.OneWay
+                });
+            ForceDangerButtonWhiteForeground(dialog);
+            ContentDialogResult result = await dialog.ShowAsync(CancellationToken.None);
+            return result == ContentDialogResult.Primary && viewModel.IsConfirmationExact;
         }
 
         // ===== 文件系统选择器 =====

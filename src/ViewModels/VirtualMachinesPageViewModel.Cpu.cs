@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Models;
 using ExHyperV.Services;
+using ExHyperV.Services.Remote.Sessions;
 using ExHyperV.Tools;
 using Wpf.Ui.Controls;
 
@@ -55,6 +56,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task GoToCpuSettingsAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (SelectedVm == null) return;
             CurrentViewType = VmDetailViewType.CpuSettings;
             IsLoadingSettings = true;
@@ -94,6 +96,8 @@ namespace ExHyperV.ViewModels
             // 会在卸载瞬间被误触发并打到本命令；运行态下这会下发整个 Processor 而被 Hyper-V 拒("无法修改 Processor")。
             // 仅当仍停留在 CPU 设置页时才执行，挡掉一切导航离开后的卸载误触发。
             if (CurrentViewType != VmDetailViewType.CpuSettings) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             IsLoadingSettings = true;
             try
             {
@@ -116,6 +120,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task GoToCpuAffinityAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (SelectedVm == null) return;
             CurrentViewType = VmDetailViewType.CpuAffinity;
             IsLoadingSettings = true;
@@ -183,6 +188,8 @@ namespace ExHyperV.ViewModels
         private async Task SaveAffinityAsync()
         {
             if (SelectedVm == null || AffinityHostCores == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             IsLoadingSettings = true;
             try
             {
@@ -245,9 +252,13 @@ namespace ExHyperV.ViewModels
             if (string.IsNullOrEmpty(savedAffinity))
                 return;
 
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease))
+                return;
+
             // 异步执行，避免阻塞 UI
             _ = Task.Run(async () =>
             {
+                using var writeScope = writeLease;
                 try
                 {
                     var coreIds = savedAffinity.Split(',')

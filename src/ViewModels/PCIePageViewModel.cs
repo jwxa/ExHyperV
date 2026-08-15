@@ -1,10 +1,11 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Interaction;
 using ExHyperV.Services;
 using MessageBox = Wpf.Ui.Controls.MessageBox;
 using TextBlock = Wpf.Ui.Controls.TextBlock;
+using ExHyperV.Services.Remote.Sessions;
 namespace ExHyperV.ViewModels
 {
     public partial class PCIePageViewModel : PageViewModelBase
@@ -27,7 +28,8 @@ namespace ExHyperV.ViewModels
         public PCIePageViewModel()
         {
             Devices = new ObservableCollection<DeviceViewModel>();
-            LoadDataCommand.Execute(null);
+            if (HasHostCapability(HostCapabilityKind.PcieDevices))
+                LoadDataCommand.Execute(null);
         }
 
         // ===== 业务方法 =====
@@ -35,6 +37,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task LoadDataAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.PcieDevices)) return;
             if (System.ComponentModel.DesignerProperties.GetIsInDesignMode(new System.Windows.DependencyObject()))
             {
                 IsLoading = false;
@@ -71,6 +74,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task ChangeAssignmentAsync(object parameter)
         {
+            if (!EnsureHostCapability(HostCapabilityKind.PcieDevices)) return;
             if (parameter is not object[] parameters || parameters.Length < 2 ||
                 parameters[0] is not DeviceViewModel deviceViewModel ||
                 parameters[1] is not AssignmentTarget target)
@@ -82,13 +86,6 @@ namespace ExHyperV.ViewModels
             IsUiEnabled = false;
             try
             {
-                // MMIO 空间不足时按算法自动扩展（不询问用户）
-                if (selectedTarget != PCIeService.HostKey)
-                {
-                    bool canProceed = await EnsureMmioSpaceAsync(selectedTarget);
-                    if (!canProceed) return;
-                }
-
                 // ── 最后一张显卡警告：直通主机当前唯一的显卡 → 主机将失去视频输出（物理屏幕黑屏风险）──
                 if (selectedTarget != PCIeService.HostKey
                     && deviceViewModel.Status == PCIeService.HostKey
@@ -107,6 +104,7 @@ namespace ExHyperV.ViewModels
                 // ── 存储控制器：直通到 VM 前处理名下磁盘（系统/启动盘拒绝；在线数据盘先脱机）──
                 // 记录本次为直通而脱机的盘号；直通失败时控制器仍在主机，需把它们重新联机
                 var offlinedDisks = new List<int>();
+                var onlineDisks = new List<ControllerDisk>();
                 if (selectedTarget != PCIeService.HostKey
                     && deviceViewModel.Status == PCIeService.HostKey
                     && (string.Equals(deviceViewModel.ClassType, "SCSIAdapter", StringComparison.OrdinalIgnoreCase)
@@ -135,7 +133,7 @@ namespace ExHyperV.ViewModels
                     }
 
                     // 在线数据盘 → 确认后脱机
-                    var onlineDisks = disks.Where(d => !d.IsOffline).ToList();
+                    onlineDisks = disks.Where(d => !d.IsOffline).ToList();
                     if (onlineDisks.Count > 0)
                     {
                         string diskList = string.Join("\n", onlineDisks.Select(d => $"• #{d.Number} {d.FriendlyName}"));
@@ -144,12 +142,6 @@ namespace ExHyperV.ViewModels
                             string.Format(Properties.Resources.PCIePage_Msg_StorageOffline, diskList),
                             Properties.Resources.Button_Yes, Properties.Resources.Button_No, showIcon: false);
                         if (!proceed) return;
-
-                        foreach (var d in onlineDisks)
-                        {
-                            await HostDiskService.SetDiskOfflineStatusAsync(d.Number, true);
-                            offlinedDisks.Add(d.Number);
-                        }
                     }
                 }
 
@@ -180,42 +172,60 @@ namespace ExHyperV.ViewModels
                     }
                 }
 
+                if (!TryBeginHostWrite(HostCapabilityKind.PcieDevices, out IHostWriteLease? writeLease)) return;
+
                 // 先直通显卡本体，再逐个直通伴随设备，各自单独报告结果
                 var errors = new List<string>();
-                var (success, errorMessage) = await PCIeService.ExecutePCIeOperationAsync(
-                    selectedTarget, deviceViewModel.Status, deviceViewModel.InstanceId, deviceViewModel.Path);
-                if (!success)
-                    errors.Add($"{deviceViewModel.FriendlyName}: {errorMessage ?? Properties.Resources.Error_Unknown}");
-
-                // 直通失败：控制器仍在主机，把先前为直通而脱机的数据盘重新联机，避免主机丢失访问
-                if (!success && offlinedDisks.Count > 0)
-                    foreach (var num in offlinedDisks)
-                        await HostDiskService.SetDiskOfflineStatusAsync(num, false);
-
-                if (success)
+                using (writeLease)
                 {
-                    foreach (var companion in companions)
+                    // MMIO 空间不足时按算法自动扩展（不询问用户）。所有确认均已完成，之后连续持有同一写租约。
+                    if (selectedTarget != PCIeService.HostKey)
                     {
-                        var (cSuccess, cError) = await PCIeService.ExecutePCIeOperationAsync(
-                            selectedTarget, companion.Status, companion.InstanceId, companion.Path);
-                        if (!cSuccess)
-                            errors.Add($"{companion.FriendlyName}: {cError ?? Properties.Resources.Error_Unknown}");
+                        bool canProceed = await EnsureMmioSpaceAsync(selectedTarget);
+                        if (!canProceed) return;
                     }
-                }
 
-                // 存储控制器返还主机后：等磁盘随控制器重新枚举（轮询最多 ~6 秒），把之前脱机的盘重新联机
-                if (success && selectedTarget == PCIeService.HostKey
-                    && (string.Equals(deviceViewModel.ClassType, "SCSIAdapter", StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(deviceViewModel.ClassType, "HDC", StringComparison.OrdinalIgnoreCase)))
-                {
-                    List<ControllerDisk> disks = new();
-                    for (int i = 0; i < 4 && disks.Count == 0; i++)
+                    foreach (var d in onlineDisks)
                     {
-                        await Task.Delay(1500);
-                        disks = await PCIeService.GetControllerDisksAsync(deviceViewModel.InstanceId);
+                        await HostDiskService.SetDiskOfflineStatusAsync(d.Number, true);
+                        offlinedDisks.Add(d.Number);
                     }
-                    foreach (var d in disks.Where(d => d.IsOffline && !d.IsSystem && !d.IsBoot))
-                        await HostDiskService.SetDiskOfflineStatusAsync(d.Number, false);
+
+                    var (success, errorMessage) = await PCIeService.ExecutePCIeOperationAsync(
+                        selectedTarget, deviceViewModel.Status, deviceViewModel.InstanceId, deviceViewModel.Path);
+                    if (!success)
+                        errors.Add($"{deviceViewModel.FriendlyName}: {errorMessage ?? Properties.Resources.Error_Unknown}");
+
+                    // 直通失败：控制器仍在主机，把先前为直通而脱机的数据盘重新联机，避免主机丢失访问
+                    if (!success && offlinedDisks.Count > 0)
+                        foreach (var num in offlinedDisks)
+                            await HostDiskService.SetDiskOfflineStatusAsync(num, false);
+
+                    if (success)
+                    {
+                        foreach (var companion in companions)
+                        {
+                            var (cSuccess, cError) = await PCIeService.ExecutePCIeOperationAsync(
+                                selectedTarget, companion.Status, companion.InstanceId, companion.Path);
+                            if (!cSuccess)
+                                errors.Add($"{companion.FriendlyName}: {cError ?? Properties.Resources.Error_Unknown}");
+                        }
+                    }
+
+                    // 存储控制器返还主机后：等磁盘随控制器重新枚举（轮询最多 ~6 秒），把之前脱机的盘重新联机
+                    if (success && selectedTarget == PCIeService.HostKey
+                        && (string.Equals(deviceViewModel.ClassType, "SCSIAdapter", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(deviceViewModel.ClassType, "HDC", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        List<ControllerDisk> disks = new();
+                        for (int i = 0; i < 4 && disks.Count == 0; i++)
+                        {
+                            await Task.Delay(1500);
+                            disks = await PCIeService.GetControllerDisksAsync(deviceViewModel.InstanceId);
+                        }
+                        foreach (var d in disks.Where(d => d.IsOffline && !d.IsSystem && !d.IsBoot))
+                            await HostDiskService.SetDiskOfflineStatusAsync(d.Number, false);
+                    }
                 }
 
                 if (errors.Count > 0)

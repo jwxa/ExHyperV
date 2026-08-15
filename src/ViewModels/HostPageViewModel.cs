@@ -5,6 +5,7 @@ using ExHyperV.Interaction;
 using ExHyperV.Tools;
 using System.Collections.ObjectModel;
 using Wpf.Ui.Controls;
+using ExHyperV.Services.Remote.Sessions;
 
 namespace ExHyperV.ViewModels
 {
@@ -55,7 +56,11 @@ namespace ExHyperV.ViewModels
 
         // ===== 构造与初始化检查 =====
 
-        public HostPageViewModel() => LoadInitialStatusAsync().SafeFireAndForget();
+        public HostPageViewModel()
+        {
+            if (HasHostCapability(HostCapabilityKind.HostHardware))
+                LoadInitialStatusAsync().SafeFireAndForget();
+        }
 
         private async Task LoadInitialStatusAsync()
         {
@@ -148,12 +153,16 @@ namespace ExHyperV.ViewModels
         partial void OnIsGpuStrategyEnabledChanged(bool value)
         {
             if (!_isInitialized) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.HostHardware, out IHostWriteLease? writeLease)) return;
+            using (writeLease)
             if (value) HyperVGpuPolicyService.AllowUnsupportedGpuAssignment(); else HyperVGpuPolicyService.ResetGpuAssignmentPolicy();
         }
 
         partial void OnIsNativeNvmeEnabledChanged(bool value)
         {
             if (!_isInitialized) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.HostHardware, out IHostWriteLease? writeLease)) return;
+            using (writeLease)
             if (value) HostNvmeService.EnableNativeNvme(); else HostNvmeService.DisableNativeNvme();
             ShowRestartPrompt(Properties.Resources.Msg_Host_NativeNvmeChanged);
         }
@@ -161,8 +170,11 @@ namespace ExHyperV.ViewModels
         partial void OnIsOpenHclFirmwareFileEnabledChanged(bool value)
         {
             if (!_isInitialized) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.HostHardware, out IHostWriteLease? writeLease)) return;
 
-            var result = HostOpenHclService.SetFirmwareLoadFromFileEnabled(value);
+            (bool Success, string Error) result;
+            using (writeLease)
+                result = HostOpenHclService.SetFirmwareLoadFromFileEnabled(value);
             if (result.Success) return;
 
             ShowError(string.Format(Properties.Resources.Error_Host_OpenHclRegistryChangeFailed, result.Error));
@@ -174,8 +186,11 @@ namespace ExHyperV.ViewModels
         partial void OnIsAzureFeatureSetEnabledChanged(bool value)
         {
             if (!_isInitialized) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.HostHardware, out IHostWriteLease? writeLease)) return;
 
-            var result = HostAzureFeatureSetService.SetEnabled(value);
+            (bool Success, string Error) result;
+            using (writeLease)
+                result = HostAzureFeatureSetService.SetEnabled(value);
             if (result.Success) return;
 
             ShowError(string.Format(Properties.Resources.Error_Host_AzureFeatureSetChangeFailed, result.Error));
@@ -187,18 +202,22 @@ namespace ExHyperV.ViewModels
         partial void OnIsNumaSpanningEnabledChanged(bool value)
         {
             if (!_isInitialized) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.HostHardware, out IHostWriteLease? writeLease)) return;
             _ = Task.Run(async () =>
             {
-                var (ok, msg) = await HyperVNumaService.SetNumaSpanningEnabledAsync(value);
-                if (!ok)
+                using (writeLease)
                 {
-                    ShowError(msg);
-                    Application.Current.Dispatcher.Invoke(() =>
+                    var (ok, msg) = await HyperVNumaService.SetNumaSpanningEnabledAsync(value);
+                    if (!ok)
                     {
-                        _isInitialized = false;
-                        IsNumaSpanningEnabled = !value;
-                        _isInitialized = true;
-                    });
+                        ShowError(msg);
+                        Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            _isInitialized = false;
+                            IsNumaSpanningEnabled = !value;
+                            _isInitialized = true;
+                        });
+                    }
                 }
             });
         }
@@ -206,20 +225,24 @@ namespace ExHyperV.ViewModels
         partial void OnCurrentSchedulerTypeChanged(HyperVSchedulerType value)
         {
             if (!_isInitialized) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.HostHardware, out IHostWriteLease? writeLease)) return;
             _ = Task.Run(async () =>
             {
-                if (await HyperVSchedulerService.SetSchedulerTypeAsync(value))
-                    ShowRestartPrompt(Properties.Resources.Msg_Host_SchedulerChanged);
-                else
+                using (writeLease)
                 {
-                    ShowError(Properties.Resources.Error_Host_SchedulerFail);
-                    var actual = HyperVSchedulerService.GetSchedulerType();
-                    Application.Current.Dispatcher.Invoke(() =>
+                    if (await HyperVSchedulerService.SetSchedulerTypeAsync(value))
+                        ShowRestartPrompt(Properties.Resources.Msg_Host_SchedulerChanged);
+                    else
                     {
-                        _isInitialized = false;
-                        CurrentSchedulerType = actual;
-                        _isInitialized = true;
-                    });
+                        ShowError(Properties.Resources.Error_Host_SchedulerFail);
+                        var actual = HyperVSchedulerService.GetSchedulerType();
+                        Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            _isInitialized = false;
+                            CurrentSchedulerType = actual;
+                            _isInitialized = true;
+                        });
+                    }
                 }
             });
         }
@@ -235,10 +258,13 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task DisableHyperVAsync()
         {
+            if (!TryBeginHostWrite(HostCapabilityKind.HostHardware, out IHostWriteLease? writeLease)) return;
             ShowTip(Properties.Resources.HostPageViewModel_DisablingHyperV);
-            var op = HyperVHostService.DisableHyperVAsync();
-            await Task.WhenAll(op, Task.Delay(1000));   // "操作中"提示至少停留 1s，不被结果一闪而过
-            bool ok = await op;
+            Task minimumDelay = Task.Delay(1000);
+            bool ok;
+            using (writeLease)
+                ok = await HyperVHostService.DisableHyperVAsync();
+            await minimumDelay;   // "操作中"提示至少停留 1s，不被结果一闪而过
             if (!ok)
             {
                 ShowError(Properties.Resources.HostPageViewModel_DisableFailed);
@@ -250,10 +276,13 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task EnableHyperVAsync()
         {
+            if (!TryBeginHostWrite(HostCapabilityKind.HostHardware, out IHostWriteLease? writeLease)) return;
             ShowTip(Properties.Resources.Msg_Host_EnableHyperV);
-            var op = HyperVHostService.EnableHyperVAsync();
-            await Task.WhenAll(op, Task.Delay(1000));   // "操作中"提示至少停留 1s，不被结果一闪而过
-            bool ok = await op;
+            Task minimumDelay = Task.Delay(1000);
+            bool ok;
+            using (writeLease)
+                ok = await HyperVHostService.EnableHyperVAsync();
+            await minimumDelay;   // "操作中"提示至少停留 1s，不被结果一闪而过
             if (!ok)
             {
                 ShowError(Properties.Resources.Error_Host_EnableFail);
@@ -280,6 +309,7 @@ namespace ExHyperV.ViewModels
 
         private async void SwitchSystemVersion(bool toServer)
         {
+            if (!EnsureHostCapability(HostCapabilityKind.HostHardware)) return;
             try
             {
                 IsSystemSwitchEnabled = false;
@@ -317,7 +347,16 @@ namespace ExHyperV.ViewModels
                     }
                 }
 
-                string result = await Task.Run(() => SystemTypeService.ApplySwitch(toServer));
+                if (!TryBeginHostWrite(HostCapabilityKind.HostHardware, out IHostWriteLease? writeLease))
+                {
+                    _isInitialized = false; IsServerSystem = !toServer; _isInitialized = true;
+                    IsSystemSwitchEnabled = HyperVHostService.IsServerSwitchApplicable();
+                    return;
+                }
+
+                string result;
+                using (writeLease)
+                    result = await Task.Run(() => SystemTypeService.ApplySwitch(toServer));
                 if (result == "SUCCESS")
                 {
                     _hasPendingSwitch = true;

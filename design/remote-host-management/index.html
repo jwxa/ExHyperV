@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ExHyperV - 远程主机管理 UI 原型</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!--
+    Assumptions
+    - 这是 WPF 桌面模块的交互原型，不是最终 Web 页面。
+    - 沿用 ExHyperV 当前 Fluent/Mica、8px 圆角、Segoe UI 和 #0078D4 品牌强调色。
+    - 示例主机与日志只用于验证信息层级，实际实现由 ViewModel 提供真实数据。
+    - 图片不是这类运维工具的内容必需项；仅复用项目现有应用图标。
+  -->
+  <header class="prototype-toolbar" aria-label="原型控制栏">
+    <div class="prototype-meta">
+      <strong>远程主机管理</strong>
+      <span>交互原型 · 示例数据</span>
+    </div>
+    <div class="prototype-controls">
+      <span class="control-label">布局</span>
+      <div class="segmented" id="layout-switcher" aria-label="布局切换">
+        <button class="active" data-layout="a" type="button">A 双栏</button>
+        <button data-layout="b" type="button">B 横栏</button>
+        <button data-layout="c" type="button">C 详情优先</button>
+      </div>
+      <span class="control-label">状态</span>
+      <select id="state-switcher" aria-label="状态切换">
+        <option value="partial">部分可用</option>
+        <option value="connected">全部可用</option>
+        <option value="reconnecting">自动重连</option>
+      </select>
+    </div>
+  </header>
+
+  <div class="app-window layout-a" id="app-window">
+    <header class="titlebar">
+      <div class="brand">
+        <img src="../../src/Assets/Icon.ico" alt="">
+        <span>ExHyperV</span>
+      </div>
+      <div class="window-actions" aria-hidden="true">
+        <span class="window-action">&#xE921;</span>
+        <span class="window-action">&#xE922;</span>
+        <span class="window-action close">&#xE8BB;</span>
+      </div>
+    </header>
+
+    <div class="app-shell">
+      <aside class="app-nav" aria-label="主导航">
+        <button class="nav-toggle icon-button" title="展开导航" aria-label="展开导航"><span>&#xE700;</span></button>
+        <nav>
+          <button class="nav-item" type="button" title="主页"><span class="nav-icon">&#xE80F;</span><span class="nav-label">主页</span></button>
+          <button class="nav-item" type="button" title="宿主环境"><span class="nav-icon">&#xE90F;</span><span class="nav-label">宿主环境</span></button>
+          <button class="nav-item selected" type="button" title="主机连接"><span class="nav-icon">&#xE839;</span><span class="nav-label">主机连接</span></button>
+          <button class="nav-item" type="button" title="虚拟机"><span class="nav-icon">&#xF5ED;</span><span class="nav-label">虚拟机</span></button>
+          <button class="nav-item" type="button" title="PCIe 直通"><span class="nav-icon">&#xF0B9;</span><span class="nav-label">PCIe 直通</span></button>
+          <button class="nav-item" type="button" title="虚拟交换机"><span class="nav-icon">&#xE774;</span><span class="nav-label">虚拟交换机</span></button>
+          <button class="nav-item" type="button" title="USB 直通"><span class="nav-icon">&#xECF0;</span><span class="nav-label">USB 直通</span></button>
+        </nav>
+        <button class="nav-item nav-settings" type="button" title="设置"><span class="nav-icon">&#xE713;</span><span class="nav-label">设置</span></button>
+      </aside>
+
+      <main class="main-content">
+        <section class="active-host-bar" aria-label="当前活动主机">
+          <div class="active-host-leading">
+            <span class="host-mark remote" id="active-host-mark">&#xE839;</span>
+            <div>
+              <span class="eyebrow">当前活动主机</span>
+              <div class="active-host-name">
+                <strong id="active-host-name">LAB-HV-06</strong>
+                <span id="active-host-address">10.0.0.6</span>
+              </div>
+            </div>
+          </div>
+          <div class="active-host-summary">
+            <span class="status-badge warning" id="active-host-badge"><i></i>部分可用</span>
+            <span class="identity-label"><span class="fluent-icon">&#xE77B;</span><span id="active-identity">JWXA\Administrator</span></span>
+            <button class="icon-button more-button" type="button" title="当前主机操作" aria-label="当前主机操作"><span>&#xE712;</span></button>
+          </div>
+        </section>
+
+        <header class="page-heading">
+          <div>
+            <h1>主机连接</h1>
+            <p>管理本机与局域网中的 Hyper-V 主机</p>
+          </div>
+          <div class="page-actions">
+            <button class="button secondary" id="open-logs" type="button"><span class="fluent-icon">&#xE8A5;</span>日志</button>
+            <button class="button primary" id="add-host" type="button"><span class="fluent-icon">&#xE710;</span>添加主机</button>
+          </div>
+        </header>
+
+        <div class="workspace">
+          <section class="hosts-pane tool-panel" aria-label="已保存主机">
+            <div class="pane-header">
+              <div>
+                <h2>已保存主机</h2>
+                <span>4 台</span>
+              </div>
+              <button class="icon-button" id="refresh-hosts" type="button" title="刷新主机列表" aria-label="刷新主机列表"><span>&#xE72C;</span></button>
+            </div>
+            <label class="search-box">
+              <span class="fluent-icon">&#xE721;</span>
+              <input id="host-search" type="search" placeholder="搜索名称或 IPv4 地址">
+            </label>
+            <div class="host-list" id="host-list">
+              <button class="host-item" type="button" data-host="local">
+                <span class="host-avatar local">&#xE7F8;</span>
+                <span class="host-copy"><strong>本地计算机</strong><small>JWXA-PC</small></span>
+                <span class="host-state success" title="已连接"></span>
+              </button>
+              <button class="host-item selected" type="button" data-host="lab">
+                <span class="host-avatar">&#xE839;</span>
+                <span class="host-copy"><strong>LAB-HV-06</strong><small>10.0.0.6</small></span>
+                <span class="host-state warning" title="部分可用"></span>
+              </button>
+              <button class="host-item" type="button" data-host="server">
+                <span class="host-avatar">&#xE839;</span>
+                <span class="host-copy"><strong>SERVER-2025</strong><small>10.0.0.20</small></span>
+                <span class="host-state success" title="已连接"></span>
+              </button>
+              <button class="host-item" type="button" data-host="dev">
+                <span class="host-avatar">&#xE839;</span>
+                <span class="host-copy"><strong>DEV-HYPERV</strong><small>10.0.0.31</small></span>
+                <span class="host-state neutral" title="未连接"></span>
+              </button>
+            </div>
+            <button class="add-inline" id="add-host-inline" type="button"><span class="fluent-icon">&#xE710;</span>添加局域网主机</button>
+          </section>
+
+          <section class="detail-pane tool-panel" aria-label="主机详情">
+            <div class="detail-header">
+              <div class="detail-title">
+                <span class="host-avatar large">&#xE839;</span>
+                <div>
+                  <div class="title-line">
+                    <h2 id="selected-host-name">LAB-HV-06</h2>
+                    <span class="status-badge warning" id="selected-host-badge"><i></i>部分可用</span>
+                  </div>
+                  <p><span id="selected-host-address">10.0.0.6</span><span class="separator">·</span><span id="selected-host-os">Windows 11 专业版</span></p>
+                </div>
+              </div>
+            <div class="detail-actions">
+              <button class="button secondary" id="diagnose-button" type="button"><span class="fluent-icon">&#xE9D9;</span>重新检测</button>
+                <button class="button primary" id="connect-button" type="button" title="选择远程主机后可连接"><span class="fluent-icon">&#xE8D4;</span>连接到此主机</button>
+            </div>
+            </div>
+
+            <div class="state-banner warning" id="state-banner">
+              <span class="banner-icon">&#xE7BA;</span>
+              <div>
+                <strong id="banner-title">管理功能可用，虚拟机控制台不可用</strong>
+                <p id="banner-copy">WMI/DCOM 已连接；TCP 2179 无法访问。你仍可管理虚拟机，但“打开控制台”会保持禁用。</p>
+              </div>
+              <button class="text-button" id="open-assistant" type="button">配置远程主机</button>
+            </div>
+
+            <nav class="tabs" aria-label="主机详情视图">
+              <button class="tab active" type="button" data-tab="overview">概览</button>
+              <button class="tab" type="button" data-tab="diagnostics">连接诊断</button>
+              <button class="tab" type="button" data-tab="capabilities">功能支持</button>
+              <button class="tab" type="button" data-tab="logs">日志</button>
+            </nav>
+
+            <div class="tab-content active" data-panel="overview">
+              <div class="connection-grid">
+                <section class="connection-channel">
+                  <div class="channel-heading"><span class="channel-icon success">&#xE73E;</span><div><strong>WMI / DCOM</strong><small>Hyper-V 管理通道</small></div><span class="result success">已连接</span></div>
+                  <dl><div><dt>命名空间</dt><dd>root\virtualization\v2</dd></div><div><dt>响应时间</dt><dd>24 ms</dd></div><div><dt>身份</dt><dd>当前 Windows 身份</dd></div></dl>
+                </section>
+                <section class="connection-channel">
+                  <div class="channel-heading"><span class="channel-icon critical">&#xE711;</span><div><strong>TCP 2179</strong><small>虚拟机控制台通道</small></div><span class="result critical">不可访问</span></div>
+                  <dl><div><dt>目标</dt><dd>10.0.0.6:2179</dd></div><div><dt>检测结果</dt><dd>连接超时</dd></div><div><dt>影响</dt><dd>控制台功能禁用</dd></div></dl>
+                </section>
+              </div>
+              <section class="section-block">
+                <div class="section-heading"><div><h3>主机信息</h3><p>上次刷新于 10:42:18</p></div><span class="stale-label" id="stale-label">实时数据</span></div>
+                <div class="property-grid">
+                  <div><span>计算机名</span><strong id="property-host-name">LAB-HV-06</strong></div>
+                  <div><span>IPv4 地址</span><strong id="property-host-ip">10.0.0.6</strong></div>
+                  <div><span>操作系统</span><strong id="property-host-os">Windows 11 24H2</strong></div>
+                  <div><span>Hyper-V</span><strong>正在运行</strong></div>
+                  <div><span>虚拟机</span><strong>6 台</strong></div>
+                  <div><span>凭据</span><strong id="property-credential">未单独保存</strong></div>
+                </div>
+              </section>
+            </div>
+
+            <div class="tab-content" data-panel="diagnostics">
+              <div class="diagnostic-toolbar"><p>检测网络、身份、WMI/DCOM 和控制台通道。</p><button class="button primary" id="run-diagnostics" type="button"><span class="fluent-icon">&#xE9D9;</span>开始检测</button></div>
+              <div class="check-list">
+                <div class="check-row"><span class="check-icon success">&#xE73E;</span><div><strong>IPv4 可达性</strong><small>10.0.0.6 响应，往返时间 3 ms</small></div><span class="check-time">10:42:16</span></div>
+                <div class="check-row"><span class="check-icon success">&#xE73E;</span><div><strong>当前 Windows 身份</strong><small>远程主机接受 JWXA\Administrator</small></div><span class="check-time">10:42:16</span></div>
+                <div class="check-row"><span class="check-icon success">&#xE73E;</span><div><strong>WMI / DCOM</strong><small>root\virtualization\v2 查询成功</small></div><span class="check-time">10:42:17</span></div>
+                <div class="check-row"><span class="check-icon critical">&#xE711;</span><div><strong>TCP 2179</strong><small>目标端口连接超时，检查防火墙入站规则</small></div><button class="text-button open-assistant-link" type="button">修复</button></div>
+              </div>
+              <pre class="log-console" id="diagnostic-log">[10:42:16.082] [检测] 开始检测 LAB-HV-06 (10.0.0.6)
+[10:42:16.119] [网络] IPv4 可达，RTT=3ms
+[10:42:16.234] [身份] 使用当前 Windows 身份：JWXA\Administrator
+[10:42:17.008] [WMI] root\virtualization\v2 查询成功
+[10:42:18.012] [控制台] TCP 10.0.0.6:2179 连接超时
+[10:42:18.013] [结果] 部分可用：管理功能正常，控制台不可用</pre>
+            </div>
+
+            <div class="tab-content" data-panel="capabilities">
+              <div class="capability-list">
+                <div class="capability-row"><span class="capability-icon success">&#xE73E;</span><div><strong>虚拟机管理</strong><small>查看、创建、启动、关闭和配置虚拟机</small></div><span class="capability-value">可用</span></div>
+                <div class="capability-row"><span class="capability-icon success">&#xE73E;</span><div><strong>虚拟交换机</strong><small>查看和修改远程主机网络配置</small></div><span class="capability-value">可用</span></div>
+                <div class="capability-row disabled"><span class="capability-icon">&#xE711;</span><div><strong>虚拟机控制台</strong><small>TCP 2179 不可访问。完成远程配置后可用。</small></div><button class="button secondary open-assistant-link" type="button">配置</button></div>
+                <div class="capability-row disabled"><span class="capability-icon">&#xE711;</span><div><strong>USB 直通</strong><small>远程主机暂不支持此功能，仅可在本地活动主机上使用。</small></div><span class="capability-value">不支持</span></div>
+                <div class="capability-row disabled"><span class="capability-icon">&#xE711;</span><div><strong>PCIe 本地设备选择</strong><small>依赖本机设备枚举，连接远程主机时不可用。</small></div><span class="capability-value">不支持</span></div>
+              </div>
+            </div>
+
+            <div class="tab-content" data-panel="logs">
+              <div class="log-summary">
+                <div><span>日志目录</span><strong>&lt;ExHyperV.exe 目录&gt;\logs</strong></div>
+                <button class="button secondary" type="button"><span class="fluent-icon">&#xED25;</span>打开目录</button>
+              </div>
+              <div class="rotation-list">
+                <div><span class="file-icon">&#xE8A5;</span><div><strong>ExHyperV.log</strong><small>当前日志 · 18.4 MB / 100 MB</small></div><progress value="18.4" max="100"></progress></div>
+                <div><span class="file-icon">&#xE8A5;</span><div><strong>ExHyperV.1.log</strong><small>上一份日志 · 76.8 MB / 100 MB</small></div><progress value="76.8" max="100"></progress></div>
+              </div>
+              <pre class="log-console tall">[10:42:18.013] [信息] 主机 LAB-HV-06 连接状态：部分可用
+[10:42:18.014] [警告] TCP 2179 不可访问，控制台能力已禁用
+[10:42:18.015] [信息] 下一次后台重试将在 30 秒后执行
+[10:42:48.016] [信息] 自动重连：第 1 次尝试
+[10:42:48.041] [信息] WMI 会话正常，无需重建</pre>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="add-host-dialog" class="dialog compact-dialog">
+    <form method="dialog" class="dialog-shell" id="add-host-form">
+      <header><div><h2>添加局域网主机</h2><p>通过 WMI/DCOM 管理，并使用 TCP 2179 打开控制台。</p></div><button class="icon-button dialog-close" value="cancel" type="submit" title="关闭" aria-label="关闭"><span>&#xE8BB;</span></button></header>
+      <div class="form-body">
+        <label class="field"><span>配置名称</span><input id="profile-name" value="LAB-HV-06" required></label>
+        <label class="field"><span>IPv4 地址</span><input id="host-ip" value="10.0.0.6" inputmode="decimal" required><small>第一版仅支持 IPv4 地址。</small></label>
+        <fieldset class="credential-fieldset"><legend>连接身份</legend>
+          <label class="radio-row"><input type="radio" name="credential-mode" value="current" checked><span><strong>当前 Windows 身份</strong><small>JWXA\Administrator</small></span></label>
+          <label class="radio-row"><input type="radio" name="credential-mode" value="explicit"><span><strong>指定其他凭据</strong><small>本地账户或域账户</small></span></label>
+        </fieldset>
+        <div class="explicit-fields" hidden>
+          <label class="field"><span>用户名</span><input placeholder="DOMAIN\User 或 HOST\User"></label>
+          <label class="field"><span>密码</span><input type="password" placeholder="输入密码"></label>
+          <label class="checkbox-row"><input type="checkbox"><span>记住凭据 <small>保存到 Windows 凭据管理器</small></span></label>
+        </div>
+        <div class="inline-note"><span class="fluent-icon">&#xE946;</span><p>保存后先执行检测；连接结果允许“管理可用、控制台不可用”。</p></div>
+      </div>
+      <footer><button class="button secondary" value="cancel" type="submit">取消</button><button class="button primary" id="save-and-detect" value="default" type="submit">保存并检测</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="connect-dialog" class="dialog compact-dialog">
+    <form method="dialog" class="dialog-shell">
+      <header><div><h2>切换活动主机</h2><p>确认后，ExHyperV 将刷新当前工作区。</p></div><button class="icon-button dialog-close" value="cancel" type="submit" title="关闭" aria-label="关闭"><span>&#xE8BB;</span></button></header>
+      <div class="form-body">
+        <div class="switch-summary"><span class="host-avatar large">&#xE839;</span><div><span>目标主机</span><strong id="connect-target">LAB-HV-06 · 10.0.0.6</strong><small>使用当前 Windows 身份</small></div></div>
+        <div class="inline-note warning-note"><span class="fluent-icon">&#xE7BA;</span><p>切换期间将暂时禁用写操作。进行中的虚拟机操作完成后才可切换。</p></div>
+      </div>
+      <footer><button class="button secondary" value="cancel" type="submit">取消</button><button class="button primary" id="confirm-connect" value="default" type="submit">确认切换</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="assistant-dialog" class="dialog wizard-dialog">
+    <div class="wizard-shell">
+      <header><div><h2>远程连接配置向导</h2><p id="wizard-host-label">LAB-HV-06 · 10.0.0.6</p></div><button class="icon-button dialog-close" id="close-assistant" type="button" title="关闭" aria-label="关闭"><span>&#xE8BB;</span></button></header>
+      <div class="wizard-layout">
+        <nav class="wizard-steps" aria-label="配置步骤">
+          <button class="active" type="button" data-step="detect"><span>1</span><div><strong>环境检测</strong><small>7 项结果</small></div></button>
+          <button type="button" data-step="account"><span>2</span><div><strong>账户授权</strong><small>选择用户</small></div></button>
+          <button type="button" data-step="network"><span>3</span><div><strong>网络与防火墙</strong><small>选择范围</small></div></button>
+          <button type="button" data-step="confirm"><span>4</span><div><strong>确认修改</strong><small>输入“确认”</small></div></button>
+        </nav>
+        <div class="wizard-content">
+          <section class="wizard-panel active" data-step-panel="detect">
+            <div class="wizard-heading"><div><h3>检测远程主机环境</h3><p>向导只检测并生成建议，不会在本步骤修改系统。</p></div><button class="button secondary" id="rerun-preflight" type="button"><span class="fluent-icon">&#xE72C;</span>重新检测</button></div>
+            <div class="preflight-summary"><span class="summary-count warning">2</span><div><strong>发现 2 项需要配置</strong><small>其余 5 项符合连接要求</small></div></div>
+            <div class="preflight-list">
+              <div><span class="check-icon success">&#xE73E;</span><div><strong>Hyper-V 服务</strong><small>vmms 正在运行</small></div><span>通过</span></div>
+              <div><span class="check-icon success">&#xE73E;</span><div><strong>WMI / DCOM</strong><small>命名空间可查询</small></div><span>通过</span></div>
+              <div><span class="check-icon warning">&#xE7BA;</span><div><strong>网络配置文件</strong><small>以太网当前为 Public，建议改为 Private</small></div><span>需确认</span></div>
+              <div><span class="check-icon warning">&#xE7BA;</span><div><strong>TCP 2179 入站规则</strong><small>未发现 ExHyperV 控制台规则</small></div><span>需配置</span></div>
+            </div>
+            <details class="detection-log" open><summary>详细检测日志</summary><pre>[10:46:02.010] 开始远程配置预检
+[10:46:02.084] 操作系统：Windows 11 Pro 24H2
+[10:46:02.105] 网络“以太网”：Public
+[10:46:02.222] Hyper-V Administrators：JWXA\Administrator 已存在
+[10:46:02.224] Remote Management Users：未包含目标账户
+[10:46:02.311] WMI 防火墙规则组：已启用
+[10:46:02.410] TCP 2179 自定义入站规则：未找到</pre></details>
+          </section>
+
+          <section class="wizard-panel" data-step-panel="account">
+            <div class="wizard-heading"><div><h3>选择允许远程管理的账户</h3><p>仅授予 Hyper-V Administrators 与 Remote Management Users。</p></div></div>
+            <div class="account-list">
+              <label><input type="radio" name="allowed-account" checked><span class="account-avatar">管</span><span><strong>Administrator</strong><small>本地账户 · 已启用</small></span><span class="tag">推荐</span></label>
+              <label><input type="radio" name="allowed-account"><span class="account-avatar">J</span><span><strong>jwxa</strong><small>本地账户 · 已启用</small></span></label>
+              <label><input type="radio" name="allowed-account"><span class="account-avatar domain">域</span><span><strong>指定域账户</strong><small>手动输入 DOMAIN\User</small></span></label>
+            </div>
+            <label class="field domain-field" hidden><span>域账户</span><input placeholder="DOMAIN\User"></label>
+            <div class="conditional-note"><strong>条件修改</strong><p>仅当选择“本地管理员账户”、主机处于工作组且策略缺失时，设置 <code>LocalAccountTokenFilterPolicy=1</code>。</p></div>
+          </section>
+
+          <section class="wizard-panel" data-step-panel="network">
+            <div class="wizard-heading"><div><h3>确认网络与访问范围</h3><p>规则只允许选定的局域网 IPv4 网段访问。</p></div></div>
+            <div class="network-profile"><div><span class="network-icon">&#xE774;</span><div><strong>以太网</strong><small>10.0.0.6 · 当前配置文件：Public</small></div></div><label class="checkbox-row"><input id="make-private" type="checkbox" checked><span>确认修改为 Private</span></label></div>
+            <fieldset class="cidr-list"><legend>允许的 IPv4 CIDR</legend>
+              <label><input type="checkbox" checked><span><strong>10.0.0.0/24</strong><small>当前客户端所在网段</small></span></label>
+              <label><input type="checkbox"><span><strong>192.168.1.0/24</strong><small>检测到的其他私有网段</small></span></label>
+              <label class="custom-cidr"><input type="checkbox"><span><strong>手动指定</strong><small>输入额外的 IPv4 CIDR</small></span><input placeholder="172.16.0.0/24"></label>
+            </fieldset>
+            <div class="changes-preview"><h4>将生成的修改</h4><ul><li>启用 Windows 内置 WMI 与 Hyper-V 防火墙规则组</li><li>创建“ExHyperV Console (TCP 2179)”入站规则</li><li>生成完整回滚脚本，不修改全局动态 RPC 端口范围</li></ul></div>
+          </section>
+
+          <section class="wizard-panel" data-step-panel="confirm">
+            <div class="wizard-heading"><div><h3>确认应用 5 项修改</h3><p>修改目标：LAB-HV-06 (10.0.0.6)</p></div></div>
+            <div class="final-change-list">
+              <div><span>01</span><p>将“以太网”网络配置文件由 Public 改为 Private</p></div>
+              <div><span>02</span><p>将 Administrator 加入两个最小权限用户组</p></div>
+              <div><span>03</span><p>启用 WMI 与 Hyper-V 内置防火墙规则组</p></div>
+              <div><span>04</span><p>允许 10.0.0.0/24 访问 TCP 2179</p></div>
+              <div><span>05</span><p>写入日志并生成 rollback-20260810-1046.ps1</p></div>
+            </div>
+            <label class="field confirmation-field"><span>输入 <strong>确认</strong> 以允许修改远程主机</span><input id="confirmation-input" autocomplete="off" placeholder="确认"></label>
+            <div class="apply-result" id="apply-result" hidden><span class="check-icon success">&#xE73E;</span><div><strong>配置已完成</strong><small>回滚脚本已保存到 logs\rollback-20260810-1046.ps1</small></div></div>
+          </section>
+        </div>
+      </div>
+      <footer><button class="button secondary" id="wizard-back" type="button" disabled>上一步</button><span class="wizard-progress">步骤 <strong id="wizard-step-number">1</strong> / 4</span><button class="button primary" id="wizard-next" type="button">下一步</button><button class="button primary" id="apply-changes" type="button" hidden disabled>应用修改</button></footer>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status"><span class="fluent-icon">&#xE73E;</span><span id="toast-message">已更新</span></div>
+  <script src="app.js"></script>
+</body>
+</html>

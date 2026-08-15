@@ -4,6 +4,9 @@ using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Services;
+using ExHyperV.Services.Remote.Consoles;
+using ExHyperV.Services.Remote.Sessions;
+using ExHyperV.Services.Remote.Vms;
 
 namespace ExHyperV.ViewModels
 {
@@ -12,14 +15,31 @@ namespace ExHyperV.ViewModels
         // ===== 字段 =====
 
         private readonly VmQueryService _queryService = new();
+        private readonly ActiveHostConsoleSession _session;
+        private readonly IActiveHostSessionCoordinator _hostCoordinator;
+        private readonly ActiveHostVmOperations _hostVmOperations;
+        private readonly CancellationTokenSource _lifetimeCts = new();
+        private readonly CancellationToken _lifetimeToken;
         private DispatcherTimer _statusTimer = null!;
         private bool _polling;   // 防止上一次轮询(WMI 慢)未完成时重入
+        private int _connectionLossProbeActive;
 
         // ===== 基础属性 =====
 
         [ObservableProperty] private string _vmId;
         [ObservableProperty] private string _vmName;
         [ObservableProperty] private bool _isRunning;
+        [ObservableProperty]
+        [NotifyCanExecuteChangedFor(nameof(StartVmCommand))]
+        [NotifyCanExecuteChangedFor(nameof(ShutdownVmCommand))]
+        [NotifyCanExecuteChangedFor(nameof(ResetVmCommand))]
+        [NotifyCanExecuteChangedFor(nameof(PauseVmCommand))]
+        [NotifyCanExecuteChangedFor(nameof(SaveVmCommand))]
+        [NotifyCanExecuteChangedFor(nameof(TurnOffVmCommand))]
+        [NotifyPropertyChangedFor(nameof(CanUsePowerMenu))]
+        private bool _canWriteToCapturedHost;
+        public bool IsLocalHost => _session.Target.IsLocal;
+        public bool IsCadAvailable => IsLocalHost && !IsEnhancedMode;
         
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(IsNotBusy))]
@@ -29,9 +49,11 @@ namespace ExHyperV.ViewModels
         [NotifyCanExecuteChangedFor(nameof(PauseVmCommand))]
         [NotifyCanExecuteChangedFor(nameof(SaveVmCommand))]
         [NotifyCanExecuteChangedFor(nameof(TurnOffVmCommand))]
+        [NotifyPropertyChangedFor(nameof(CanUsePowerMenu))]
         private bool _isBusy = false;
 
         public bool IsNotBusy => !IsBusy;
+        public bool CanUsePowerMenu => !IsBusy && CanWriteToCapturedHost;
 
         public event EventHandler? SendCadRequested;
         /// <summary>每次状态轮询完成后触发（供消费方按 VM 运行状态同步连接，无需额外定时器）。</summary>
@@ -39,10 +61,18 @@ namespace ExHyperV.ViewModels
 
         // ===== 构造 =====
 
-        public ConsoleViewModel(string vmId, string vmName)
+        public ConsoleViewModel(
+            ActiveHostConsoleSession session,
+            IActiveHostSessionCoordinator hostCoordinator)
         {
-            VmId = vmId;
-            VmName = vmName;
+            _session = session ?? throw new ArgumentNullException(nameof(session));
+            _hostCoordinator = hostCoordinator ?? throw new ArgumentNullException(nameof(hostCoordinator));
+            _hostVmOperations = new ActiveHostVmOperations(_hostCoordinator, new HostWmiContextResolver());
+            _lifetimeToken = _lifetimeCts.Token;
+            VmId = session.VmId.ToString("D");
+            VmName = session.VmName;
+            _hostCoordinator.StateChanged += OnActiveHostStateChanged;
+            UpdateCapturedHostCapabilities(_hostCoordinator.Current);
             // 打开控制台时优先用配置里保存的缩放档（语言中立："auto"→当前语言的适应窗口，百分比直用）；无/无效则保持默认 100%。
             var savedZoom = SettingsService.GetDefaultZoom();
             if (savedZoom == ZoomAutoToken) SelectedZoom = Properties.Resources.ConsoleWindow_ZoomAuto;
@@ -79,10 +109,24 @@ namespace ExHyperV.ViewModels
             _polling = true;
             try
             {
-                var vms = await _queryService.GetVmListAsync();
-                var currentVm = vms.FirstOrDefault(v =>
-                    v.Id.ToString().Equals(VmId, StringComparison.OrdinalIgnoreCase) ||
-                    v.Name.Equals(VmName, StringComparison.OrdinalIgnoreCase));
+                if (!_hostCoordinator.CanUseConsole(_session.Stamp)) return;
+                HostVmReadResult<(Models.VmInstance? Vm, bool EnhancedAvailable)> read =
+                    await _hostVmOperations.ReadAsync(
+                        async (context, cancellationToken) =>
+                        {
+                            var vms = await _queryService.GetVmListAsync(context, cancellationToken);
+                            var current = vms.FirstOrDefault(v =>
+                                v.Id == _session.VmId
+                                || v.Name.Equals(VmName, StringComparison.OrdinalIgnoreCase));
+                            bool enhancedAvailable = current?.IsRunning == true
+                                && await VmConsoleService.IsEnhancedSessionAvailableAsync(current.Name, context);
+                            return (current, enhancedAvailable);
+                        },
+                        _lifetimeToken,
+                        _session.Stamp);
+                if (!read.Succeeded) return;
+
+                var currentVm = read.Value.Vm;
 
                 if (currentVm != null)
                 {
@@ -90,7 +134,7 @@ namespace ExHyperV.ViewModels
                     if (VmName != currentVm.Name) VmName = currentVm.Name; // 更新名称
 
                     // 根据增强会话可用状态更新菜单并处理自动切换。
-                    bool avail = currentVm.IsRunning && await VmConsoleService.IsEnhancedSessionAvailableAsync(currentVm.Name);
+                    bool avail = read.Value.EnhancedAvailable;
                     IsEnhancedAvailable = avail;
                     if (!avail) _promotedThisAvailability = false;
                     if (_preferEnhanced && avail && !IsEnhancedMode && !_promotedThisAvailability && CurrentWidth > 0)
@@ -99,6 +143,9 @@ namespace ExHyperV.ViewModels
                         SelectedSessionMode = Properties.Resources.ConsoleViewModel_EnhancedSession;
                     }
                 }
+            }
+            catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)
+            {
             }
             catch (Exception ex)
             {
@@ -110,9 +157,47 @@ namespace ExHyperV.ViewModels
             }
             Polled?.Invoke();   // 通知消费方按最新 VM 运行状态同步 RDP 连接（连/断/重连）
         }
+
+        public async Task ReportUnexpectedConnectionLossAsync(string reason)
+        {
+            if (_session.Target.IsLocal
+                || _lifetimeToken.IsCancellationRequested
+                || Interlocked.CompareExchange(ref _connectionLossProbeActive, 1, 0) != 0)
+                return;
+
+            try
+            {
+                if (!_hostCoordinator.CanUseConsole(_session.Stamp)) return;
+
+                HostVmReadResult<Models.VmInstance?> read = await _hostVmOperations.ReadAsync(
+                    async (context, cancellationToken) =>
+                    {
+                        var vms = await _queryService.GetVmListAsync(context, cancellationToken);
+                        return vms.FirstOrDefault(v =>
+                            v.Id == _session.VmId
+                            || v.Name.Equals(VmName, StringComparison.OrdinalIgnoreCase));
+                    },
+                    _lifetimeToken,
+                    _session.Stamp);
+
+                // 虚拟机已关机或删除属于单个控制台的正常结束，不把整个宿主标记为断线。
+                if (read.Succeeded && (read.Value is null || !read.Value.IsRunning)) return;
+                if (!_hostCoordinator.CanApply(_session.Stamp)) return;
+
+                _hostCoordinator.ReportConnectionLoss(_session.Stamp, reason);
+            }
+            catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)
+            {
+            }
+            finally
+            {
+                Volatile.Write(ref _connectionLossProbeActive, 0);
+            }
+        }
         // ===== 电源控制 =====
 
-        private bool CanExecutePowerAction() => !IsBusy;
+        private bool CanExecutePowerAction() => !IsBusy && CanWriteToCapturedHost;
+        private bool CanExecuteLocalPowerAction() => IsLocalHost && CanExecutePowerAction();
 
         [RelayCommand(CanExecute = nameof(CanExecutePowerAction))]
         private async Task StartVmAsync() => await ExecutePowerActionAsync("Start");
@@ -123,10 +208,10 @@ namespace ExHyperV.ViewModels
         [RelayCommand(CanExecute = nameof(CanExecutePowerAction))]
         private async Task ResetVmAsync() => await ExecutePowerActionAsync("Restart");
 
-        [RelayCommand(CanExecute = nameof(CanExecutePowerAction))]
+        [RelayCommand(CanExecute = nameof(CanExecuteLocalPowerAction))]
         private async Task PauseVmAsync() => await ExecutePowerActionAsync("Suspend");
 
-        [RelayCommand(CanExecute = nameof(CanExecutePowerAction))]
+        [RelayCommand(CanExecute = nameof(CanExecuteLocalPowerAction))]
         private async Task SaveVmAsync() => await ExecutePowerActionAsync("Save");
 
         [RelayCommand(CanExecute = nameof(CanExecutePowerAction))]
@@ -134,13 +219,33 @@ namespace ExHyperV.ViewModels
 
         private async Task ExecutePowerActionAsync(string action)
         {
+            if (!CanExecutePowerAction()) return;
+            if (!IsLocalHost && action is not ("Start" or "Stop" or "TurnOff" or "Restart"))
+            {
+                Debug.WriteLine("远程控制台仅支持启动、正常关机、强制关机和重启。" );
+                return;
+            }
+
             try
             {
                 IsBusy = true;
-                var result = await VmPowerService.ExecuteControlActionAsync(VmName, action);
+                HostVmWriteResult result = await _hostVmOperations.WriteAsync(
+                    async (context, cancellationToken) =>
+                    {
+                        var response = await VmPowerService.ExecuteControlActionAsync(
+                            VmName,
+                            action,
+                            context,
+                            cancellationToken);
+                        return response.Success
+                            ? HostVmBackendWriteResult.Success()
+                            : HostVmBackendWriteResult.Failure(response);
+                    },
+                    _session.Stamp,
+                    _lifetimeToken);
                 // 控制台是独立窗口，主窗 snackbar 会错位，故此处记日志而非弹窗(VM 页电源按钮已 ShowError 弹引擎错误)
-                if (!result.Success)
-                    Debug.WriteLine(string.Format(Properties.Resources.ConsoleViewModel_OperationFailed, result.Error));
+                if (!result.Succeeded)
+                    Debug.WriteLine(string.Format(Properties.Resources.ConsoleViewModel_OperationFailed, result.Message));
             }
             catch (Exception ex)
             {
@@ -157,6 +262,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private void SendCad()
         {
+            if (!IsCadAvailable) return;
             Debug.WriteLine(Properties.Resources.ConsoleViewModel_LogSendCadActivated);
             SendCadRequested?.Invoke(this, EventArgs.Empty);
         }
@@ -244,6 +350,7 @@ namespace ExHyperV.ViewModels
         {
             IsEnhancedMode = (value == Properties.Resources.ConsoleViewModel_EnhancedSession);
             OnPropertyChanged(nameof(CanChangeResolution));
+            OnPropertyChanged(nameof(IsCadAvailable));
         }
 
         public bool CanChangeResolution => IsEnhancedMode;
@@ -283,6 +390,27 @@ namespace ExHyperV.ViewModels
                 ResolutionChangeRequested?.Invoke(w, h);
         }
 
-        public void Dispose() => _statusTimer?.Stop();
+        public void Dispose()
+        {
+            _statusTimer?.Stop();
+            _hostCoordinator.StateChanged -= OnActiveHostStateChanged;
+            _lifetimeCts.Cancel();
+            _lifetimeCts.Dispose();
+        }
+
+        private void OnActiveHostStateChanged(object? sender, ActiveHostStateChangedEventArgs e)
+        {
+            void Update() => UpdateCapturedHostCapabilities(e.Current);
+            var dispatcher = System.Windows.Application.Current?.Dispatcher;
+            if (dispatcher is null || dispatcher.CheckAccess()) Update();
+            else dispatcher.Invoke(Update);
+        }
+
+        private void UpdateCapturedHostCapabilities(ActiveHostCoordinatorSnapshot snapshot)
+        {
+            CanWriteToCapturedHost = snapshot.Capabilities[HostCapabilityKind.VmWrite].CanExecute
+                && snapshot.ActiveSession.Generation == _session.Stamp.Generation
+                && snapshot.ActiveSession.Target.ProfileId == _session.Stamp.ProfileId;
+        }
     }
 }

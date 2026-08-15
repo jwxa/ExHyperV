@@ -4,6 +4,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Models;
 using ExHyperV.Services;
+using ExHyperV.Services.Remote.Sessions;
 using ExHyperV.Tools;
 
 namespace ExHyperV.ViewModels
@@ -54,6 +55,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task GoToPcieSettingsAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.PcieDevices)) return;
             if (SelectedVm == null) return;
             CurrentViewType = VmDetailViewType.PcieSettings;
             await LoadPcieSettingsAsync(SelectedVm);
@@ -61,6 +63,7 @@ namespace ExHyperV.ViewModels
 
         private async Task LoadPcieSettingsAsync(VmInstanceViewModel vm)
         {
+            if (!HasHostCapability(HostCapabilityKind.PcieDevices)) return;
             int loadVersion = ++_pcieLoadVersion;
             IsLoadingSettings = true;
             try
@@ -97,6 +100,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task EnablePcieEmulationAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.PcieDevices)) return;
             if (SelectedVm == null || !PcieSystemSettingsAvailable || PcieEmulationEnabled) return;
             var vm = SelectedVm;
             bool confirmed = await ConfirmPermanentEmulationAsync();
@@ -105,6 +109,8 @@ namespace ExHyperV.ViewModels
                 OnPropertyChanged(nameof(PcieEmulationEnabled));
                 return;
             }
+            if (!TryBeginHostWrite(HostCapabilityKind.PcieDevices, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             var result = await VmPcieService.SetSystemSettingsAsync(
                 vm.Name, enableEmulation: true, SelectedPcieTopology);
@@ -121,7 +127,8 @@ namespace ExHyperV.ViewModels
 
         partial void OnSelectedPcieTopologyChanged(ushort value)
         {
-            if (IsApplySuppressed
+            if (!HasHostCapability(HostCapabilityKind.PcieDevices)
+                || IsApplySuppressed
                 || CurrentViewType != VmDetailViewType.PcieSettings
                 || SelectedVm == null
                 || !PcieSystemSettingsAvailable)
@@ -132,6 +139,7 @@ namespace ExHyperV.ViewModels
 
         private async Task ApplyPcieTopologyAsync(ushort topology)
         {
+            if (!HasHostCapability(HostCapabilityKind.PcieDevices)) return;
             if (SelectedVm == null || !PcieSystemSettingsAvailable) return;
             var vm = SelectedVm;
             ushort previousTopology = _appliedPcieTopology;
@@ -143,6 +151,8 @@ namespace ExHyperV.ViewModels
                     RestorePcieTopology(vm, previousTopology);
                     return;
                 }
+                if (!TryBeginHostWrite(HostCapabilityKind.PcieDevices, out IHostWriteLease? writeLease)) return;
+                using var writeScope = writeLease;
 
                 var result = await VmPcieService.SetSystemSettingsAsync(
                     vm.Name, PcieEmulationEnabled || enablesEmulation, topology);
@@ -175,13 +185,16 @@ namespace ExHyperV.ViewModels
 
         partial void OnBootPciExpressEnabledChanged(bool value)
         {
-            if (IsApplySuppressed || SelectedVm == null || !BootPciExpressAvailable) return;
+            if (!HasHostCapability(HostCapabilityKind.PcieDevices)
+                || IsApplySuppressed || SelectedVm == null || !BootPciExpressAvailable) return;
             _ = ApplyBootPciExpressAsync(value);
         }
 
         private async Task ApplyBootPciExpressAsync(bool value)
         {
             if (SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.PcieDevices, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             var vm = SelectedVm;
             var result = await VmPcieService.SetBootPciExpressAsync(vm.Name, value);
             if (result.Success)
@@ -198,6 +211,7 @@ namespace ExHyperV.ViewModels
         private void OnPcieDevicePropertyChanged(object? sender, PropertyChangedEventArgs e)
         {
             if (e.PropertyName != nameof(VmPcieDeviceSetting.GuestMode)
+                || !HasHostCapability(HostCapabilityKind.PcieDevices)
                 || IsApplySuppressed
                 || CurrentViewType != VmDetailViewType.PcieSettings
                 || sender is not VmPcieDeviceSetting device
@@ -214,14 +228,17 @@ namespace ExHyperV.ViewModels
             var vm = SelectedVm;
             try
             {
-                if (device.GuestMode == VmPcieGuestMode.Emulated && !PcieEmulationEnabled)
+                bool enablesEmulation = device.GuestMode == VmPcieGuestMode.Emulated && !PcieEmulationEnabled;
+                if (enablesEmulation && !await ConfirmPermanentEmulationAsync())
                 {
-                    if (!await ConfirmPermanentEmulationAsync())
-                    {
-                        RestorePcieDeviceMode(device);
-                        return;
-                    }
+                    RestorePcieDeviceMode(device);
+                    return;
+                }
+                if (!TryBeginHostWrite(HostCapabilityKind.PcieDevices, out IHostWriteLease? writeLease)) return;
+                using var writeScope = writeLease;
 
+                if (enablesEmulation)
+                {
                     var enable = await VmPcieService.SetSystemSettingsAsync(
                         vm.Name, enableEmulation: true, SelectedPcieTopology);
                     if (!enable.Success)

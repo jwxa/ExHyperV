@@ -3,6 +3,7 @@ using System.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Services;
+using ExHyperV.Services.Remote.Sessions;
 
 namespace ExHyperV.ViewModels
 {
@@ -47,6 +48,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task GoToSecuritySettingsAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (SelectedVm == null) return;
             CurrentViewType = VmDetailViewType.Security;
             await LoadSecurityStateAsync();
@@ -54,6 +56,7 @@ namespace ExHyperV.ViewModels
 
         private async Task LoadSecurityStateAsync()
         {
+            if (!HasHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (SelectedVm == null) return;
             IsLoadingSettings = true;
             try
@@ -84,19 +87,22 @@ namespace ExHyperV.ViewModels
         // 改动即应用；成功不弹提示(控件本身即反馈)，失败弹引擎原因并回弹。
         partial void OnSecureBootEnabledChanged(bool value)
         {
-            if (IsApplySuppressed || SelectedVm == null) return;
+            if (!CanApplySecuritySetting()) return;
             _ = ApplySecurityAsync(() => VmSecurityService.SetSecureBootAsync(SelectedVm.Name, value), () => SecureBootEnabled = !value);
         }
 
         partial void OnTpmEnabledChanged(bool value)
         {
-            if (IsApplySuppressed || SelectedVm == null) return;
+            if (!CanApplySecuritySetting()) return;
             _ = ApplyTpmAsync(value);
         }
 
         // TPM 改完成功后整页刷新，让互锁(加密可用性等)与最新状态一致。
         private async Task ApplyTpmAsync(bool value)
         {
+            if (SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             var (ok, msg) = await VmSecurityService.SetTpmAsync(SelectedVm.Name, value);
             if (ok) { await LoadSecurityStateAsync(); return; }
             ShowError($"{Properties.Resources.Xaml_SecurityFeat}：{msg}");
@@ -105,19 +111,22 @@ namespace ExHyperV.ViewModels
 
         partial void OnEncryptionEnabledChanged(bool value)
         {
-            if (IsApplySuppressed || SelectedVm == null) return;
+            if (!CanApplySecuritySetting()) return;
             _ = ApplySecurityAsync(() => VmSecurityService.SetEncryptionAsync(SelectedVm.Name, value), () => EncryptionEnabled = !value);
         }
 
         partial void OnShieldingEnabledChanged(bool value)
         {
-            if (IsApplySuppressed || SelectedVm == null) return;
+            if (!CanApplySecuritySetting()) return;
             _ = ApplyShieldingAsync(value);
         }
 
         // 防护改变会连带 TPM/加密(启用时强制开)，成功后整页刷新让互锁与显示一致。
         private async Task ApplyShieldingAsync(bool value)
         {
+            if (SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             var (ok, msg) = await VmSecurityService.SetShieldingAsync(SelectedVm.Name, value);
             if (ok) { await LoadSecurityStateAsync(); return; }
             ShowError($"{Properties.Resources.Xaml_SecurityFeat}：{msg}");
@@ -126,13 +135,16 @@ namespace ExHyperV.ViewModels
 
         partial void OnSelectedSecureBootTemplateChanged(SecureBootTemplate? value)
         {
-            if (IsApplySuppressed || SelectedVm == null || value == null) return;
+            if (!CanApplySecuritySetting() || value == null) return;
             _ = ApplyTemplateAsync(value);
         }
 
         // 模板锁无法预判：直接试改。成功即可；失败(开过机的 vTPM VM 被引擎锁)弹引擎真实错误 + 回退到上次生效值。
         private async Task ApplyTemplateAsync(SecureBootTemplate value)
         {
+            if (SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             var (ok, msg) = await VmSecurityService.SetSecureBootTemplateAsync(SelectedVm.Name, value.Guid);
             if (ok) { _appliedTemplate = value; return; }
 
@@ -142,6 +154,8 @@ namespace ExHyperV.ViewModels
 
         private async Task ApplySecurityAsync(Func<Task<(bool Success, string Message)>> action, Action? revert)
         {
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             var (ok, msg) = await action();
             if (ok) return;
 
@@ -149,5 +163,11 @@ namespace ExHyperV.ViewModels
             if (revert == null) return;
             using (SuppressApply()) revert();
         }
+
+        private bool CanApplySecuritySetting() =>
+            HasHostCapability(HostCapabilityKind.VmAdvancedSettings)
+            && !IsApplySuppressed
+            && CurrentViewType == VmDetailViewType.Security
+            && SelectedVm != null;
     }
 }

@@ -7,6 +7,7 @@ using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Interaction;
 using ExHyperV.Models;
 using ExHyperV.Services;
+using ExHyperV.Services.Remote.Sessions;
 using ExHyperV.Tools;
 using Wpf.Ui.Controls;
 
@@ -39,6 +40,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private void RenameVm(VmInstanceViewModel vm)
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (vm == null) return;
             vm.StartEditing();
         }
@@ -54,6 +56,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task CommitRenameAsync(VmInstanceViewModel vm)
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (vm == null || !vm.IsEditing) return;
             vm.IsEditing = false;
 
@@ -62,6 +65,8 @@ namespace ExHyperV.ViewModels
             string oldName = vm.Name;
             string newName = vm.EditedName;
             Guid vmId = vm.Id; // 使用唯一 ID
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             IsLoading = true;
             try
@@ -178,6 +183,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task CreateVmAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             // --- 1. UI 状态与标志位重置 ---
             IsLoadingSettings = true;
             IsCreatingVm = true;
@@ -301,6 +307,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private void BrowseNewVmPath()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             var picked = Dialogs.PickFolder(Properties.Resources.VmPage_SelectConfigDir,
                 string.IsNullOrWhiteSpace(NewVmStoragePath) ? null : NewVmStoragePath);
             if (picked != null) NewVmStoragePath = picked;
@@ -310,6 +317,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private void BrowseNewDiskLocation()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             var picked = Dialogs.PickFolder(Properties.Resources.VmPage_SelectNewVhdPath,
                 string.IsNullOrWhiteSpace(NewVmNewDiskPath) ? null : NewVmNewDiskPath);
             if (picked != null)
@@ -322,6 +330,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private void BrowseExistingDisk()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             var picked = Dialogs.PickOpenFile(Properties.Resources.VmPage_SelectExistVhd, Properties.Resources.VmPage_VhdFilterBoth, GetDir(NewVmExistingDiskPath));
             if (picked != null) NewVmExistingDiskPath = picked;
         }
@@ -329,6 +338,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private void BrowseIsoImage()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             var picked = Dialogs.PickOpenFile(Properties.Resources.VmPage_SelectIso, Properties.Resources.VmPage_IsoFilter, GetDir(NewVmIsoPath));
             if (picked != null) NewVmIsoPath = picked;
         }
@@ -336,6 +346,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private void BrowseOpenHclIgvm()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             var picked = Dialogs.PickOpenFile(
                 Properties.Resources.VmPage_SelectOpenHclIgvm,
                 Properties.Resources.VmPage_OpenHclIgvmFilter,
@@ -346,6 +357,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task ConfirmCreateAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             // --- 1. 基础验证：名称 ---
             if (string.IsNullOrWhiteSpace(NewVmName))
             {
@@ -453,6 +465,9 @@ namespace ExHyperV.ViewModels
                 SwitchName = NewVmSelectedSwitch,
                 StartAfterCreation = StartVmAfterCreation
             };
+
+            if (!TryBeginHostWrite(HostCapabilityKind.LocalFileSystem, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             IsLoadingSettings = true;
             try

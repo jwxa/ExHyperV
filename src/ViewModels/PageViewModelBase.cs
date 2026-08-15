@@ -1,5 +1,6 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using ExHyperV.Interaction;
+using ExHyperV.Services.Remote.Sessions;
 using Wpf.Ui.Controls;
 
 namespace ExHyperV.ViewModels
@@ -29,6 +30,29 @@ namespace ExHyperV.ViewModels
 
         protected void ShowRestartPrompt(string message)
             => Notifications.ShowRestartPrompt(message);
+
+        protected static bool HasHostCapability(HostCapabilityKind kind) =>
+            ActiveHostSessions.Current.Current.Capabilities[kind].CanExecute;
+
+        protected bool EnsureHostCapability(HostCapabilityKind kind)
+        {
+            HostCapability capability = ActiveHostSessions.Current.Current.Capabilities[kind];
+            if (capability.CanExecute) return true;
+            ShowTip(capability.Reason);
+            return false;
+        }
+
+        protected bool TryBeginHostWrite(
+            HostCapabilityKind requiredCapability,
+            out IHostWriteLease? lease)
+        {
+            lease = null;
+            if (!EnsureHostCapability(requiredCapability)) return false;
+            if (ActiveHostSessions.Current.TryBeginWrite(out lease, out string reason)) return true;
+
+            ShowTip(reason);
+            return false;
+        }
 
         // ===== 程序性赋值抑制 =====
         // 加载/失败回弹时会以代码给绑定属性赋值，这会触发 OnXxxChanged / PropertyChanged 处理器；

@@ -67,7 +67,7 @@
                                            Margin="0"
                                            CornerRadius="0,4,4,0"
                                            HorizontalContentAlignment="Center"
-                                           IsEnabled="{Binding IsNotBusy}">
+                                           IsEnabled="{Binding CanUsePowerMenu}">
                                     <ui:DropDownButton.Flyout>
                                         <ContextMenu>
                                             <MenuItem Header="{x:Static properties:Resources.ConsoleWindow_Restart}" Command="{Binding ResetVmCommand}">
@@ -75,12 +75,12 @@
                                                     <ui:SymbolIcon Symbol="ArrowSync24"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
-                                            <MenuItem Header="{x:Static properties:Resources.ConsoleWindow_Pause}" Command="{Binding PauseVmCommand}">
+                                            <MenuItem Header="{x:Static properties:Resources.ConsoleWindow_Pause}" Command="{Binding PauseVmCommand}" Visibility="{Binding IsLocalHost, Converter={StaticResource BoolToVis}}">
                                                 <MenuItem.Icon>
                                                     <ui:SymbolIcon Symbol="Pause24"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
-                                            <MenuItem Header="{x:Static properties:Resources.ConsoleWindow_SaveState}" Command="{Binding SaveVmCommand}">
+                                            <MenuItem Header="{x:Static properties:Resources.ConsoleWindow_SaveState}" Command="{Binding SaveVmCommand}" Visibility="{Binding IsLocalHost, Converter={StaticResource BoolToVis}}">
                                                 <MenuItem.Icon>
                                                     <ui:SymbolIcon Symbol="Save24"/>
                                                 </MenuItem.Icon>
@@ -164,7 +164,7 @@
                                    Margin="8,0,0,0"
                                    Command="{Binding SendCadCommand}"
                                    ToolTip="{x:Static properties:Resources.ConsoleWindow_SendCtrlAltDel}"
-                                   Visibility="{Binding IsEnhancedMode, Converter={StaticResource BoolToVis}, ConverterParameter=Invert}">
+                                   Visibility="{Binding IsCadAvailable, Converter={StaticResource BoolToVis}}">
                             <ui:SymbolIcon Symbol="Keyboard24" FontSize="16" />
                         </ui:Button>
 

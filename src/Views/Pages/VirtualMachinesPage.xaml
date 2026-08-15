@@ -42,6 +42,141 @@
             <Grid Background="Transparent"/>
         </DataTemplate>
 
+        <DataTemplate x:Key="RemoteVmDetailTemplate">
+            <Grid Margin="28">
+                <Grid.Resources>
+                    <Style x:Key="RemoteStartActionStyle" TargetType="ui:Button">
+                        <Setter Property="IsEnabled" Value="False"/>
+                        <Style.Triggers>
+                            <MultiDataTrigger>
+                                <MultiDataTrigger.Conditions>
+                                    <Condition Binding="{Binding IsRunning}" Value="False"/>
+                                    <Condition Binding="{Binding DataContext.AreRemoteWritesAvailable, RelativeSource={RelativeSource AncestorType=Page}}" Value="True"/>
+                                </MultiDataTrigger.Conditions>
+                                <Setter Property="IsEnabled" Value="True"/>
+                            </MultiDataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                    <Style x:Key="RemoteRunningActionStyle" TargetType="ui:Button">
+                        <Setter Property="IsEnabled" Value="False"/>
+                        <Style.Triggers>
+                            <MultiDataTrigger>
+                                <MultiDataTrigger.Conditions>
+                                    <Condition Binding="{Binding IsRunning}" Value="True"/>
+                                    <Condition Binding="{Binding DataContext.AreRemoteWritesAvailable, RelativeSource={RelativeSource AncestorType=Page}}" Value="True"/>
+                                </MultiDataTrigger.Conditions>
+                                <Setter Property="IsEnabled" Value="True"/>
+                            </MultiDataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Grid.Resources>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <StackPanel>
+                    <TextBlock Text="{Binding Name}" FontSize="28" FontWeight="SemiBold"
+                               TextTrimming="CharacterEllipsis"
+                               Foreground="{ui:ThemeResource TextFillColorPrimaryBrush}"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <ui:SymbolIcon Symbol="Desktop24" FontSize="16" Margin="0,0,6,0"/>
+                        <TextBlock Text="{Binding DataContext.ActiveHostDisplayName, RelativeSource={RelativeSource AncestorType=Page}}"
+                                   FontSize="13" FontWeight="SemiBold"/>
+                        <TextBlock Text="  ·  " Opacity="0.45"/>
+                        <TextBlock Text="{Binding DataContext.ActiveHostDisplayAddress, RelativeSource={RelativeSource AncestorType=Page}}"
+                                   FontFamily="Consolas" FontSize="13"/>
+                    </StackPanel>
+                </StackPanel>
+
+                <Grid Grid.Row="1" Margin="0,26,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0">
+                        <TextBlock Text="状态" FontSize="12" Opacity="0.6"/>
+                        <TextBlock Text="{Binding State}" FontSize="16" Margin="0,4,0,0"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <TextBlock Text="处理器" FontSize="12" Opacity="0.6"/>
+                        <TextBlock Text="{Binding CpuCount, StringFormat={}{0} vCPU}" FontSize="16" Margin="0,4,0,0"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="4">
+                        <TextBlock Text="启动内存" FontSize="12" Opacity="0.6"/>
+                        <TextBlock Text="{Binding MemoryGb, StringFormat={}{0:F1} GB}" FontSize="16" Margin="0,4,0,0"/>
+                    </StackPanel>
+                </Grid>
+
+                <WrapPanel Grid.Row="2" Margin="0,28,0,0">
+                    <ui:Button Content="控制台" Icon="Desktop24"
+                               Appearance="Secondary" MinWidth="112" Height="38" Margin="0,0,8,8"
+                               Command="{Binding DataContext.OpenNativeConnectCommand, RelativeSource={RelativeSource AncestorType=Page}}"
+                               IsEnabled="{Binding DataContext.IsConsoleAvailable, RelativeSource={RelativeSource AncestorType=Page}}"
+                               ToolTip="{Binding DataContext.ConsoleUnavailableText, RelativeSource={RelativeSource AncestorType=Page}}"
+                               ToolTipService.ShowOnDisabled="True"/>
+                    <ui:Button Content="{x:Static properties:Resources.Button_Start}" Icon="Play24"
+                               Appearance="Primary" MinWidth="112" Height="38" Margin="0,0,8,8"
+                               Command="{Binding ControlCommand}" CommandParameter="Start"
+                               Style="{StaticResource RemoteStartActionStyle}"
+                               ToolTip="{Binding DataContext.RemoteWriteUnavailableText, RelativeSource={RelativeSource AncestorType=Page}}"
+                               ToolTipService.ShowOnDisabled="True"/>
+                    <ui:Button Content="{x:Static properties:Resources.Button_ShutDown}" Icon="Stop24"
+                               Appearance="Secondary" MinWidth="112" Height="38" Margin="0,0,8,8"
+                               Command="{Binding ControlCommand}" CommandParameter="Stop"
+                               Style="{StaticResource RemoteRunningActionStyle}"
+                               ToolTip="{Binding DataContext.RemoteWriteUnavailableText, RelativeSource={RelativeSource AncestorType=Page}}"
+                               ToolTipService.ShowOnDisabled="True"/>
+                    <ui:Button Content="{x:Static properties:Resources.Button_Restart}" Icon="ArrowCounterclockwise24"
+                               Appearance="Secondary" MinWidth="104" Height="38" Margin="0,0,8,8"
+                               Command="{Binding ControlCommand}" CommandParameter="Restart"
+                               Style="{StaticResource RemoteRunningActionStyle}"
+                               ToolTip="{Binding DataContext.RemoteWriteUnavailableText, RelativeSource={RelativeSource AncestorType=Page}}"
+                               ToolTipService.ShowOnDisabled="True"/>
+                    <ui:Button Content="{x:Static properties:Resources.Button_TurnOff}" Icon="Power24"
+                               Appearance="Danger" Foreground="White" MinWidth="112" Height="38" Margin="0,0,0,8"
+                               Command="{Binding ControlCommand}" CommandParameter="TurnOff"
+                               Style="{StaticResource RemoteRunningActionStyle}"
+                               ToolTip="{Binding DataContext.RemoteWriteUnavailableText, RelativeSource={RelativeSource AncestorType=Page}}"
+                               ToolTipService.ShowOnDisabled="True"/>
+                </WrapPanel>
+
+                <Border Grid.Row="3" Margin="0,24,0,0" Padding="16"
+                        VerticalAlignment="Top" CornerRadius="6"
+                        Background="{ui:ThemeResource ControlFillColorSecondaryBrush}"
+                        BorderBrush="{ui:ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <StackPanel Orientation="Horizontal">
+                            <ui:SymbolIcon Symbol="Info24" FontSize="18" Margin="0,0,8,0"/>
+                            <TextBlock Text="远程宿主模式" FontWeight="SemiBold" FontSize="14"/>
+                        </StackPanel>
+                        <Grid Grid.Row="1" Margin="26,10,0,0" Opacity="0.55" IsEnabled="False">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <WrapPanel>
+                                <ui:Button Content="本机文件与磁盘" Icon="FolderOpen24" Margin="0,0,8,8"/>
+                                <ui:Button Content="GPU 与 PCIe" Icon="Video24" Margin="0,0,8,8"/>
+                                <ui:Button Content="高级硬件设置" Icon="Settings24" Margin="0,0,0,8"/>
+                            </WrapPanel>
+                            <TextBlock Grid.Row="1" Text="这些操作依赖本机文件、设备或系统接口，当前远程宿主不可用。控制台由独立 TCP 2179 通道提供。"
+                                       FontSize="12" TextWrapping="Wrap"/>
+                        </Grid>
+                    </Grid>
+                </Border>
+            </Grid>
+        </DataTemplate>
+
         <DataTemplate x:Key="VmListItemTemplate">
             <Border Background="Transparent" Padding="2,6" 
             Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Page}}">
@@ -76,7 +211,10 @@
                         <ui:MenuItem Header="{x:Static properties:Resources.VmPage_MenuOpenFolder}"
              Command="{Binding PlacementTarget.Tag.OpenVmFolderCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
              CommandParameter="{Binding}"
-             Visibility="{Binding PlacementTarget.Tag.IsSingleOrNoneSelect, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}">
+             Visibility="{Binding PlacementTarget.Tag.IsSingleOrNoneSelect, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}"
+             IsEnabled="{Binding PlacementTarget.Tag.CanUseLocalFiles, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+             ToolTipService.ShowOnDisabled="True"
+             ToolTip="{Binding PlacementTarget.Tag.LocalFileUnavailableText, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
                             <ui:MenuItem.Icon>
                                 <ui:SymbolIcon Symbol="FolderOpen24" />
                             </ui:MenuItem.Icon>
@@ -87,7 +225,10 @@
                         <ui:MenuItem Header="{x:Static properties:Resources.Xaml_Rename}"
                              Command="{Binding PlacementTarget.Tag.RenameVmCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                              CommandParameter="{Binding}"
-                             Visibility="{Binding PlacementTarget.Tag.IsSingleOrNoneSelect, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}">
+                              Visibility="{Binding PlacementTarget.Tag.IsSingleOrNoneSelect, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}"
+                              IsEnabled="{Binding PlacementTarget.Tag.CanUseLocalVmFeatures, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                              ToolTipService.ShowOnDisabled="True"
+                              ToolTip="{Binding PlacementTarget.Tag.RemoteFeatureUnavailableText, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
                             <ui:MenuItem.Icon>
                                 <ui:SymbolIcon Symbol="Rename24" />
                             </ui:MenuItem.Icon>
@@ -97,7 +238,10 @@
                         <ui:MenuItem Header="{x:Static properties:Resources.VmPage_PurgeBtn}"
              Command="{Binding PlacementTarget.Tag.PurgeVmCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
              CommandParameter="{Binding}"
-             Foreground="{ui:ThemeResource SystemFillColorCriticalBrush}">
+             Foreground="{ui:ThemeResource SystemFillColorCriticalBrush}"
+             IsEnabled="{Binding PlacementTarget.Tag.CanUseLocalFiles, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+             ToolTipService.ShowOnDisabled="True"
+             ToolTip="{Binding PlacementTarget.Tag.LocalFileUnavailableText, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
                             <ui:MenuItem.Icon>
                                 <ui:SymbolIcon Symbol="DeleteDismiss24" Foreground="{ui:ThemeResource SystemFillColorCriticalBrush}"/>
                             </ui:MenuItem.Icon>
@@ -107,7 +251,10 @@
                         <ui:MenuItem Header="{x:Static properties:Resources.Xaml_Delete}" 
                              Command="{Binding PlacementTarget.Tag.DeleteVmCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                              CommandParameter="{Binding}"
-                             Foreground="{ui:ThemeResource SystemFillColorCriticalBrush}">
+                              Foreground="{ui:ThemeResource SystemFillColorCriticalBrush}"
+                              IsEnabled="{Binding PlacementTarget.Tag.CanUseLocalVmFeatures, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                              ToolTipService.ShowOnDisabled="True"
+                              ToolTip="{Binding PlacementTarget.Tag.RemoteFeatureUnavailableText, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
                             <ui:MenuItem.Icon>
                                 <ui:SymbolIcon Symbol="Delete24" Foreground="{ui:ThemeResource SystemFillColorCriticalBrush}" />
                             </ui:MenuItem.Icon>
@@ -186,7 +333,9 @@
             </Border>
         </DataTemplate>
         <DataTemplate x:Key="VmDetailTemplate">
-            <Grid>
+            <Grid IsEnabled="{Binding DataContext.CanUseLocalVmFeatures, RelativeSource={RelativeSource AncestorType=Page}}"
+                  ToolTip="{Binding DataContext.RemoteFeatureUnavailableText, RelativeSource={RelativeSource AncestorType=Page}}"
+                  ToolTipService.ShowOnDisabled="True">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
@@ -269,7 +418,10 @@
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                     <ui:Button Content="{x:Static properties:Resources.Label_Console}" Icon="Desktop24" Appearance="Secondary" 
                                                Padding="16,6" Height="36" Margin="0,0,8,0" CornerRadius="8"
-                                               Command="{Binding DataContext.OpenNativeConnectCommand, RelativeSource={RelativeSource AncestorType=Page}}" />
+                                               Command="{Binding DataContext.OpenNativeConnectCommand, RelativeSource={RelativeSource AncestorType=Page}}"
+                                               IsEnabled="{Binding DataContext.IsConsoleAvailable, RelativeSource={RelativeSource AncestorType=Page}}"
+                                               ToolTip="{Binding DataContext.ConsoleUnavailableText, RelativeSource={RelativeSource AncestorType=Page}}"
+                                               ToolTipService.ShowOnDisabled="True" />
                                     <Border CornerRadius="8" ClipToBounds="True">
                                         <Grid>
                                             <ui:Button Content="{x:Static properties:Resources.Button_Start}" Icon="Play24" Appearance="Primary" 
@@ -667,7 +819,9 @@
                Height="24"
                Icon="{ui:SymbolIcon Symbol=Add24}"
                Appearance="Secondary"
-               ToolTip="{x:Static properties:Resources.Xaml_CreateVm}"
+               ToolTip="{Binding CreateVmToolTip}"
+               ToolTipService.ShowOnDisabled="True"
+               IsEnabled="{Binding CanUseLocalFiles}"
                Command="{Binding CreateVmCommand}"/>
                     <!-- 请确保 ViewModel 中有对应的 Command -->
                 </Grid>
@@ -693,6 +847,9 @@
                             <Setter Property="ContentTemplate" Value="{StaticResource VmDetailTemplate}" />
 
                             <Style.Triggers>
+                                <DataTrigger Binding="{Binding DataContext.IsRemoteHostActive, RelativeSource={RelativeSource AncestorType=Page}}" Value="True">
+                                    <Setter Property="ContentTemplate" Value="{StaticResource RemoteVmDetailTemplate}" />
+                                </DataTrigger>
                                 <!-- 逻辑 1 (低优先级): 没有选 VM 时，显示“未选择”文字 -->
                                 <DataTrigger Binding="{Binding SelectedVm}" Value="{x:Null}">
                                     <Setter Property="ContentTemplate" Value="{StaticResource VmEmptyStateTemplate}" />

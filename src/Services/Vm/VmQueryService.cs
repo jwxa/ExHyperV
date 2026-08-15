@@ -1,4 +1,4 @@
-﻿using ExHyperV.Models;
+using ExHyperV.Models;
 using ExHyperV.Tools;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -62,8 +62,14 @@ namespace ExHyperV.Services
 
         // --- 查询方法 ---
 
-        public async Task<List<VmInstance>> GetVmListAsync()
+        public async Task<List<VmInstance>> GetVmListAsync(
+            WmiContext? context = null,
+            CancellationToken cancellationToken = default)
         {
+            context ??= WmiContext.Local;
+            if (!context.IsLocal)
+                return await GetRemoteVmListAsync(context, cancellationToken);
+
             const string QueryVirtualDiskAllocations = "SELECT InstanceID, Parent, HostResource, ResourceType FROM Msvm_StorageAllocationSettingData WHERE ResourceType = 31 OR ResourceType = 16";
             const string QueryPhysicalDiskAllocations = "SELECT InstanceID, Parent, HostResource, ResourceType FROM Msvm_ResourceAllocationSettingData WHERE ResourceType = 17";
 
@@ -385,6 +391,85 @@ namespace ExHyperV.Services
             }
 
             return resultList.OrderByDescending(x => x.IsRunning).ThenBy(x => x.Name).ToList();
+        }
+
+        private static async Task<List<VmInstance>> GetRemoteVmListAsync(
+            WmiContext context,
+            CancellationToken cancellationToken)
+        {
+            var summaryTask = WmiApi.QueryAsync(QuerySummary, obj =>
+            {
+                long rawMem = Convert.ToInt64(obj["MemoryUsage"] ?? 0);
+                return new SummaryItem(
+                    obj["Name"]?.ToString() ?? "",
+                    obj["ElementName"]?.ToString() ?? "",
+                    Convert.ToUInt16(obj["EnabledState"] ?? (ushort)0),
+                    Convert.ToInt32(obj["NumberOfProcessors"] ?? 1),
+                    (rawMem <= 0 || rawMem > 1048576) ? 0.0 : rawMem,
+                    Convert.ToUInt64(obj["UpTime"] ?? 0UL),
+                    obj["Notes"]?.ToString() ?? "");
+            }, WmiScope.HyperV, context);
+
+            var memoryTask = WmiApi.QueryAsync(QueryMemSettings, obj => new MemItem(
+                obj["InstanceID"]?.ToString() ?? "",
+                Convert.ToDouble(obj["VirtualQuantity"] ?? 0)), WmiScope.HyperV, context);
+
+            var settingsTask = WmiApi.QueryAsync(QuerySettings, obj =>
+            {
+                string subType = obj["VirtualSystemSubType"]?.ToString() ?? "";
+                int generation = subType.EndsWith(":1", StringComparison.Ordinal) ? 1
+                    : subType.EndsWith(":2", StringComparison.Ordinal) ? 2
+                    : 0;
+                return new ConfigItem(
+                    obj["ConfigurationID"]?.ToString()?.Trim('{', '}').ToUpperInvariant() ?? "",
+                    generation,
+                    obj["Version"]?.ToString() ?? "0.0");
+            }, WmiScope.HyperV, context);
+
+            await Task.WhenAll(summaryTask, memoryTask, settingsTask).WaitAsync(cancellationToken);
+            var summaryResponse = await summaryTask;
+            var memoryResponse = await memoryTask;
+            var settingsResponse = await settingsTask;
+            if (!summaryResponse.Success)
+                throw summaryResponse.ToException("读取远程虚拟机清单失败");
+            if (!memoryResponse.Success)
+                throw memoryResponse.ToException("读取远程虚拟机内存设置失败");
+            if (!settingsResponse.Success)
+                throw settingsResponse.ToException("读取远程虚拟机系统设置失败");
+
+            List<MemItem> memories = memoryResponse.Data ?? [];
+            Dictionary<string, ConfigItem> settings = (settingsResponse.Data ?? [])
+                .Where(item => !string.IsNullOrWhiteSpace(item.VmGuid))
+                .ToDictionary(item => item.VmGuid, StringComparer.OrdinalIgnoreCase);
+            var result = new List<VmInstance>();
+            foreach (SummaryItem summary in summaryResponse.Data ?? [])
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Guid.TryParse(summary.Id, out Guid id);
+                string idKey = summary.Id.Trim('{', '}').ToUpperInvariant();
+                double startupRam = memories
+                    .FirstOrDefault(item => item.FullId.Contains(summary.Id, StringComparison.OrdinalIgnoreCase))
+                    ?.StartupRam ?? 0.0;
+                var vm = new VmInstance(id, summary.Name)
+                {
+                    CpuCount = summary.Cpu,
+                    MemoryGb = Math.Round(startupRam / 1024.0, 1),
+                    AssignedMemoryGb = Math.Round((summary.MemUsage > 0 ? summary.MemUsage : startupRam) / 1024.0, 1),
+                    Notes = summary.Notes,
+                    OsType = NotesTag.Get(summary.Notes, "OSType") is { Length: > 0 } osType ? osType : "Windows",
+                    StateText = VmMapper.MapStateCodeToText(summary.State),
+                    StateCode = summary.State,
+                    RawUptime = TimeSpan.FromMilliseconds(summary.Uptime)
+                };
+                if (settings.TryGetValue(idKey, out ConfigItem? setting))
+                {
+                    vm.Generation = setting.Gen;
+                    vm.Version = setting.Ver;
+                }
+                result.Add(vm);
+            }
+
+            return result.OrderByDescending(vm => vm.IsRunning).ThenBy(vm => vm.Name).ToList();
         }
 
         // --- 性能监控相关方法 ---

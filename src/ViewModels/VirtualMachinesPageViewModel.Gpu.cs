@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Interaction;
 using ExHyperV.Models;
 using ExHyperV.Services;
+using ExHyperV.Services.Remote.Sessions;
 using ExHyperV.Tools;
 using Wpf.Ui.Controls;
 
@@ -46,6 +47,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task GoToGpuSettingsAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (SelectedVm == null) return;
 
             CurrentViewType = VmDetailViewType.GpuSettings;
@@ -146,6 +148,8 @@ namespace ExHyperV.ViewModels
 
             var itemToRemove = SelectedVm.AssignedGpus.FirstOrDefault(x => x.AdapterId == adapterId);
             if (itemToRemove == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             IsLoadingSettings = true;
             try
@@ -183,11 +187,15 @@ namespace ExHyperV.ViewModels
         }
 
         private bool CanUpdateGpuDrivers(VmGpuAssignment assignment) =>
-            SelectedVm != null && assignment != null && !string.IsNullOrWhiteSpace(assignment.PName);
+            HasHostCapability(HostCapabilityKind.PcieDevices)
+            && SelectedVm != null
+            && assignment != null
+            && !string.IsNullOrWhiteSpace(assignment.PName);
 
         [RelayCommand(CanExecute = nameof(CanUpdateGpuDrivers))]
         private async Task UpdateGpuDriversAsync(VmGpuAssignment assignment)
         {
+            if (!EnsureHostCapability(HostCapabilityKind.PcieDevices)) return;
             if (!CanUpdateGpuDrivers(assignment)) return;
 
             IsLoadingSettings = true;
@@ -254,6 +262,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task GoToAddGpuAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.PcieDevices)) return;
             if (SelectedVm == null) return;
 
             IsLoadingSettings = true;
@@ -285,9 +294,12 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task CancelAddGpuAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.PcieDevices)) return;
             // 处理中途取消的回滚
             if (!string.IsNullOrEmpty(_currentProcessingGpuAdapterId) && SelectedVm != null)
             {
+                if (!TryBeginHostWrite(HostCapabilityKind.PcieDevices, out IHostWriteLease? writeLease)) return;
+                using var writeScope = writeLease;
                 try
                 {
                     await _vmGpuService.RemoveGpuPartitionAsync(SelectedVm.Name, _currentProcessingGpuAdapterId);
@@ -302,7 +314,7 @@ namespace ExHyperV.ViewModels
 
         partial void OnSelectedPartitionChanged(PartitionInfo? value)
         {
-            if (value == null) return;
+            if (!HasHostCapability(HostCapabilityKind.PcieDevices) || value == null) return;
             _ = SelectPartitionAndContinueCommand.ExecuteAsync(value);
             Application.Current.Dispatcher.BeginInvoke(new Action(() =>
             {
@@ -312,12 +324,14 @@ namespace ExHyperV.ViewModels
         }
 
         // 检查是否可以确认添加
-        private bool CanConfirmAddGpu() => SelectedHostGpu != null;
+        private bool CanConfirmAddGpu() =>
+            HasHostCapability(HostCapabilityKind.PcieDevices) && SelectedHostGpu != null;
 
         // 确认添加 GPU 并开始流程
         [RelayCommand(CanExecute = nameof(CanConfirmAddGpu))]
         private async Task ConfirmAddGpu()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.PcieDevices)) return;
             if (SelectedHostGpu == null) return;
 
             CurrentViewType = VmDetailViewType.AddGpuProgress;
@@ -388,11 +402,14 @@ namespace ExHyperV.ViewModels
         // 执行 GPU 部署工作流
         private async Task RunRealGpuWorkflowAsync(int startIndex)
         {
+            if (!TryBeginHostWrite(HostCapabilityKind.PcieDevices, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             var tasks = GpuTasks;
             _currentProcessingGpuAdapterId = null;
 
             for (int i = startIndex; i < tasks.Count; i++)
             {
+                if (!HasHostCapability(HostCapabilityKind.PcieDevices)) return;
                 if (CurrentViewType != VmDetailViewType.AddGpuProgress || SelectedHostGpu == null)
                 {
                     Debug.WriteLine("GPU Workflow aborted: UI state or SelectedHostGpu has been reset.");
@@ -574,7 +591,9 @@ namespace ExHyperV.ViewModels
         private async Task SelectPartitionAndContinueAsync(PartitionInfo partition)
         {
             var driveTask = GpuTasks.FirstOrDefault(t => t.TaskType == GpuTaskType.Driver);
-            if (driveTask == null) return;
+            if (driveTask == null || SelectedVm == null || SelectedHostGpu == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.PcieDevices, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             if (partition.OsType == OperatingSystemType.Windows)
             {
@@ -734,6 +753,10 @@ namespace ExHyperV.ViewModels
                 proxyPort = port;
             }
 
+            if (SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.PcieDevices, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
+
             // 4. UI 切换：隐藏卡片，显示控制台
             ShowPartitionSelector = false;
             ShowSshForm = false;
@@ -875,6 +898,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task ResetGpuDeploymentAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.PcieDevices)) return;
             _gpuDeploymentCts?.Cancel();
             _gpuDeploymentCts = new CancellationTokenSource();
             IsLoadingSettings = false;
@@ -886,6 +910,8 @@ namespace ExHyperV.ViewModels
             // 1. 若已分配但未完成，物理回滚 GPU 分区
             if (!string.IsNullOrEmpty(_currentProcessingGpuAdapterId) && SelectedVm != null)
             {
+                if (!TryBeginHostWrite(HostCapabilityKind.PcieDevices, out IHostWriteLease? writeLease)) return;
+                using var writeScope = writeLease;
                 AppendLog(Properties.Resources.VmPage_GpuUserRollback);
                 try
                 {

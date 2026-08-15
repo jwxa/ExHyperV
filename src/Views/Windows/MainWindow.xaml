@@ -45,6 +45,16 @@
                 </ui:NavigationViewItem>
 
                 <ui:NavigationViewItem
+                    Content="主机连接"
+                    NavigationCacheMode="Enabled"
+                    TargetPageType="{x:Type pages:HostConnectionPage}">
+                    <ui:NavigationViewItem.Icon>
+                        <ui:SymbolIcon Symbol="Server24" FontSize="16"/>
+                    </ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
+
+                <ui:NavigationViewItem
+                    x:Name="HostNavigationItem"
                     Content="{x:Static properties:Resources.Section_Host}"
                     NavigationCacheMode="Enabled"
                     TargetPageType="{x:Type pages:HostPage}">
@@ -55,6 +65,7 @@
                 
 
                 <ui:NavigationViewItem
+                    x:Name="VmNavigationItem"
                     Content="{x:Static properties:Resources.Menu_VM}"
                     NavigationCacheMode="Enabled"
                     TargetPageType="{x:Type pages:VirtualMachinesPage}">
@@ -64,6 +75,7 @@
                 </ui:NavigationViewItem>
                 
                 <ui:NavigationViewItem
+                    x:Name="PcieNavigationItem"
                     Content="{x:Static properties:Resources.PCIe}"
                     NavigationCacheMode="Enabled"
                     TargetPageType="{x:Type pages:PCIePage}">
@@ -73,6 +85,7 @@
                 </ui:NavigationViewItem>
 
                 <ui:NavigationViewItem
+                    x:Name="SwitchNavigationItem"
                     Content="{x:Static properties:Resources.Title_VirtualSwitch}"
                     NavigationCacheMode="Enabled"
                     Foreground="{ui:ThemeResource TextFillColorPrimaryBrush}"
@@ -84,9 +97,10 @@
 
                 <!-- USB 直通菜单项 -->
                 <ui:NavigationViewItem
-    Content="{x:Static properties:Resources.Label_UsbPassthrough}" 
-    NavigationCacheMode="Enabled"
-    TargetPageType="{x:Type pages:USBPage}">
+                    x:Name="UsbNavigationItem"
+                    Content="{x:Static properties:Resources.Label_UsbPassthrough}"
+                    NavigationCacheMode="Enabled"
+                    TargetPageType="{x:Type pages:USBPage}">
                     <ui:NavigationViewItem.Icon>
                         <!-- USB 图标，与 PCIe 页 USB 控制器一致（DeviceIcons 的 USB glyph ECF0） -->
                         <ui:FontIcon FontSize="16" FontFamily="{DynamicResource SegoeFluentIcons}" Glyph="&#xECF0;"/>

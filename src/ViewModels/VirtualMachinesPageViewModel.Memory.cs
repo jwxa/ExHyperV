@@ -1,6 +1,7 @@
 using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Models;
 using ExHyperV.Services;
+using ExHyperV.Services.Remote.Sessions;
 using ExHyperV.Tools;
 using Wpf.Ui.Controls;
 
@@ -32,6 +33,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task GoToMemorySettingsAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (SelectedVm == null) return;
             CurrentViewType = VmDetailViewType.MemorySettings;
             IsLoadingSettings = true;
@@ -76,48 +78,53 @@ namespace ExHyperV.ViewModels
         {
             if (CurrentViewType != VmDetailViewType.MemorySettings) return;
             if (SelectedVm?.MmioSettings == null || SelectedVm.IsRunning || string.IsNullOrEmpty(propertyName)) return;
-
-            IsLoadingSettings = true;
-            try
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using (writeLease)
             {
-                var result = await VmMmioService.SetSettingAsync(
-                    SelectedVm.Name,
-                    SelectedVm.MmioSettings,
-                    propertyName);
 
-                if (!result.Success)
+                IsLoadingSettings = true;
+                try
                 {
-                    ShowError($"{Properties.Resources.Error_Common_SaveFail}：{FriendlyError.CleanLines(result.Error)}");
+                    var result = await VmMmioService.SetSettingAsync(
+                        SelectedVm.Name,
+                        SelectedVm.MmioSettings,
+                        propertyName);
+
+                    if (!result.Success)
+                    {
+                        ShowError($"{Properties.Resources.Error_Common_SaveFail}：{FriendlyError.CleanLines(result.Error)}");
+                        if (_originalMmioSettingsCache != null)
+                        {
+                            using (SuppressApply())
+                                RestoreMmioProperty(SelectedVm.MmioSettings, _originalMmioSettingsCache, propertyName);
+                        }
+                    }
+                    else
+                    {
+                        _originalMmioSettingsCache ??= SelectedVm.MmioSettings.Clone();
+                        RestoreMmioProperty(_originalMmioSettingsCache, SelectedVm.MmioSettings, propertyName);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ShowError(FriendlyError.CleanLines(ex.Message));
                     if (_originalMmioSettingsCache != null)
                     {
                         using (SuppressApply())
                             RestoreMmioProperty(SelectedVm.MmioSettings, _originalMmioSettingsCache, propertyName);
                     }
                 }
-                else
+                finally
                 {
-                    _originalMmioSettingsCache ??= SelectedVm.MmioSettings.Clone();
-                    RestoreMmioProperty(_originalMmioSettingsCache, SelectedVm.MmioSettings, propertyName);
+                    IsLoadingSettings = false;
                 }
-            }
-            catch (Exception ex)
-            {
-                ShowError(FriendlyError.CleanLines(ex.Message));
-                if (_originalMmioSettingsCache != null)
-                {
-                    using (SuppressApply())
-                        RestoreMmioProperty(SelectedVm.MmioSettings, _originalMmioSettingsCache, propertyName);
-                }
-            }
-            finally
-            {
-                IsLoadingSettings = false;
             }
         }
 
         private async void MemorySettings_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
         {
-            if (IsApplySuppressed || IsLoadingSettings || SelectedVm?.MemorySettings == null)
+            if (!HasHostCapability(HostCapabilityKind.VmAdvancedSettings)
+                || IsApplySuppressed || IsLoadingSettings || SelectedVm?.MemorySettings == null)
                 return;
 
             var fastTrackProps = new[] {
@@ -142,7 +149,14 @@ namespace ExHyperV.ViewModels
             if (fastTrackProps.Contains(e.PropertyName))
             {
                 if (SelectedVm.IsRunning) return;
+                if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease))
+                {
+                    using (SuppressApply())
+                        SelectedVm.MemorySettings.Restore(_originalMemorySettingsCache);
+                    return;
+                }
 
+                using (writeLease)
                 using (SuppressApply())
                 {
                     NormalizeMemoryBackingSettings(SelectedVm.MemorySettings, e.PropertyName);
@@ -183,36 +197,40 @@ namespace ExHyperV.ViewModels
             // 部分控件在导航离开、卸载时可能触发命令；运行态改内存也会被拒。仅在仍处于内存页时执行。
             if (CurrentViewType != VmDetailViewType.MemorySettings) return;
             if (SelectedVm?.MemorySettings == null) return;
-
-            using (SuppressApply())
-                NormalizeMemoryBackingSettings(SelectedVm.MemorySettings, null);
-
-            IsLoadingSettings = true;
-            try
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using (writeLease)
             {
-                var result = await VmMemoryService.SetVmMemorySettingsAsync(
-                    SelectedVm.Name,
-                    SelectedVm.MemorySettings,
-                    SelectedVm.IsRunning // 传入当前运行状态
-                );
 
-                if (!result.Success)
-                {
-                    ShowError($"{Properties.Resources.Error_Common_SaveFail}：{FriendlyError.CleanLines(result.Message)}");
-                }
-                else
-                {
-                    // 保存成功后更新缓存基准
-                    _originalMemorySettingsCache = SelectedVm.MemorySettings.Clone();
-                }
+                using (SuppressApply())
+                    NormalizeMemoryBackingSettings(SelectedVm.MemorySettings, null);
 
-                await GoToMemorySettingsAsync();
+                IsLoadingSettings = true;
+                try
+                {
+                    var result = await VmMemoryService.SetVmMemorySettingsAsync(
+                        SelectedVm.Name,
+                        SelectedVm.MemorySettings,
+                        SelectedVm.IsRunning // 传入当前运行状态
+                    );
+
+                    if (!result.Success)
+                    {
+                        ShowError($"{Properties.Resources.Error_Common_SaveFail}：{FriendlyError.CleanLines(result.Message)}");
+                    }
+                    else
+                    {
+                        // 保存成功后更新缓存基准
+                        _originalMemorySettingsCache = SelectedVm.MemorySettings.Clone();
+                    }
+
+                    await GoToMemorySettingsAsync();
+                }
+                catch (Exception ex)
+                {
+                    ShowError(FriendlyError.CleanLines(ex.Message));
+                }
+                finally { IsLoadingSettings = false; }
             }
-            catch (Exception ex)
-            {
-                ShowError(FriendlyError.CleanLines(ex.Message));
-            }
-            finally { IsLoadingSettings = false; }
         }
         // --- 实验性功能的纯中文数据源 (禁止任何英文) ---
 

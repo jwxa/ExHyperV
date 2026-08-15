@@ -6,6 +6,7 @@ using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Interaction;
 using ExHyperV.Models;
 using ExHyperV.Services;
+using ExHyperV.Services.Remote.Sessions;
 using ExHyperV.Tools;
 using Wpf.Ui.Controls;
 
@@ -66,6 +67,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task GoToStorageSettingsAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (SelectedVm == null) return;
             CurrentViewType = VmDetailViewType.StorageSettings;
 
@@ -105,6 +107,8 @@ namespace ExHyperV.ViewModels
         {
             // 空值、正在运行、或已经在优化中的磁盘不处理
             if (item == null || SelectedVm == null || SelectedVm.IsRunning || item.IsOptimizing) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.LocalFileSystem, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             // 进入优化状态
             item.IsOptimizing = true;
@@ -144,6 +148,8 @@ namespace ExHyperV.ViewModels
         private async Task RemoveStorageItemAsync(VmStorageItem item)
         {
             if (SelectedVm == null || item == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.LocalFileSystem, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             IsLoadingSettings = true;
             try
             {
@@ -162,13 +168,16 @@ namespace ExHyperV.ViewModels
         // 判断是否可以编辑存储路径
         private bool CanEditStorage(VmStorageItem item)
         {
-            return item != null && item.DiskType != "Physical";
+            return HasHostCapability(HostCapabilityKind.LocalFileSystem)
+                   && item != null
+                   && item.DiskType != "Physical";
         }
 
         // 修改存储路径（换盘/换ISO）
         [RelayCommand(CanExecute = nameof(CanEditStorage))]
         private async Task EditStoragePath(VmStorageItem driveItem)
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             if (SelectedVm == null || driveItem == null) return;
 
             if (driveItem.DiskType == "Physical")
@@ -190,6 +199,8 @@ namespace ExHyperV.ViewModels
 
             var picked = Dialogs.PickOpenFile(title, filter);
             if (picked == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.LocalFileSystem, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             IsLoadingSettings = true;
             try
@@ -238,6 +249,7 @@ namespace ExHyperV.ViewModels
         // 判断路径是否可打开文件夹
         private bool CanOpenFolder(string path)
         {
+            if (!HasHostCapability(HostCapabilityKind.LocalFileSystem)) return false;
             if (string.IsNullOrWhiteSpace(path)) return false;
             if (int.TryParse(path, out _)) return false;
             if (path.StartsWith("PhysicalDisk", StringComparison.OrdinalIgnoreCase)) return false;
@@ -246,7 +258,11 @@ namespace ExHyperV.ViewModels
 
         // 在资源管理器中定位（文件高亮 / 目录打开，统一走 Shell 门面）
         [RelayCommand(CanExecute = nameof(CanOpenFolder))]
-        private void OpenFolder(string path) => Shell.Reveal(path);
+        private void OpenFolder(string path)
+        {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
+            Shell.Reveal(path);
+        }
 
 
         // ===== 存储管理模块 - 添加设备向导 =====
@@ -365,6 +381,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task GoToAddStorageAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             if (SelectedVm == null) return;
 
             IsLoadingSettings = true;
@@ -390,6 +407,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task ConfirmAddStorageAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             if (SelectedVm == null) return;
 
             // 运行中不能往 IDE 加设备(IDE 无热插拔);Gen1 光驱只能挂 IDE → 运行中加光驱在此提前拦下给因,不冲到后端裸报错
@@ -468,6 +486,15 @@ namespace ExHyperV.ViewModels
 
                 target = IsoOutputPath;
 
+                if (!Directory.Exists(IsoSourceFolderPath))
+                {
+                    ShowTip(Properties.Resources.Error_Storage_SourceNoExist);
+                    return;
+                }
+
+                if (!TryBeginHostWrite(HostCapabilityKind.LocalFileSystem, out IHostWriteLease? directoryWriteLease)) return;
+                using var directoryWriteScope = directoryWriteLease;
+
                 var outputDir = Path.GetDirectoryName(IsoOutputPath);
                 if (!string.IsNullOrEmpty(outputDir) && !Directory.Exists(outputDir))
                 {
@@ -482,11 +509,6 @@ namespace ExHyperV.ViewModels
                     }
                 }
 
-                if (!Directory.Exists(IsoSourceFolderPath))
-                {
-                    ShowTip(Properties.Resources.Error_Storage_SourceNoExist);
-                    return;
-                }
             }
 
             await AddDriveWrapperAsync(
@@ -511,6 +533,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private void BrowseFile()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             string? picked;
             if (IsNewDisk && DeviceType == "HardDisk")
             {
@@ -531,6 +554,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private void BrowseFolder()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             var picked = Dialogs.PickFolder(initialDir: string.IsNullOrWhiteSpace(IsoSourceFolderPath) ? null : IsoSourceFolderPath);
             if (picked != null)
             {
@@ -545,6 +569,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private void BrowseParentFile()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             var picked = Dialogs.PickOpenFile(null, Properties.Resources.Filter_VhdOnly,
                 string.IsNullOrWhiteSpace(ParentPath) ? null : System.IO.Path.GetDirectoryName(ParentPath));
             if (picked != null) ParentPath = picked;
@@ -554,6 +579,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private void BrowseSaveIso()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
             var picked = Dialogs.PickSaveFile(Properties.Resources.Title_SaveIso, Properties.Resources.Filter_IsoExt, ".iso",
                 string.IsNullOrWhiteSpace(IsoOutputPath) ? null : System.IO.Path.GetDirectoryName(IsoOutputPath),
                 string.IsNullOrWhiteSpace(IsoOutputPath) ? $"{IsoVolumeLabel}.iso" : System.IO.Path.GetFileName(IsoOutputPath));
@@ -564,6 +590,8 @@ namespace ExHyperV.ViewModels
         public async Task AddDriveWrapperAsync(string driveType, bool isPhysical, string pathOrNumber, bool isNew, int sizeGb = 128, string vhdType = "Dynamic", string parentPath = "", string isoSourcePath = null, string isoVolumeLabel = null)
         {
             if (SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.LocalFileSystem, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             IsLoadingSettings = true;
             try
             {

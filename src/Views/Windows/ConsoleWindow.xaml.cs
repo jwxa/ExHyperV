@@ -8,6 +8,8 @@ using Wpf.Ui.Controls;
 using ExHyperV.Services;
 using ExHyperV.Tools;
 using ExHyperV.ViewModels;
+using ExHyperV.Services.Remote.Consoles;
+using ExHyperV.Services.Remote.Sessions;
 
 namespace ExHyperV.Views
 {
@@ -30,6 +32,8 @@ namespace ExHyperV.Views
         private const double EnhancedResizeBorder = 3;
 
         private readonly ConsoleViewModel _vm;
+        private readonly ActiveHostConsoleSession _session;
+        private readonly IActiveHostSessionCoordinator _hostCoordinator;
         private bool _isFullScreen;               // 供 WM_GETMINMAXINFO 判断最大化铺满显示器还是工作区
         private bool _syncingFs;                  // 防止 mstscax→VM→mstscax 全屏状态回灌
         private bool _weInitiatedDisconnect;      // 标记我方主动断开(模式切换/VM 停止)，以免被当作"非预期断开"
@@ -46,9 +50,14 @@ namespace ExHyperV.Views
         private bool _closing;                                    // 用户经连接栏关闭：抑制断开后的自动重连（避免"复活"）
         private bool _topHookAdded;                                // 顶边缩放钩子是否已在 ContentRendered 注册（只挂一次）
 
-        public ConsoleWindow(string vmId, string vmName)
+        public ConsoleWindow(ActiveHostConsoleSession session)
         {
-            _vm = new ConsoleViewModel(vmId, vmName);
+            _session = session ?? throw new ArgumentNullException(nameof(session));
+            _hostCoordinator = ActiveHostSessions.Current;
+            if (!_hostCoordinator.CanUseConsole(session.Stamp))
+                throw new InvalidOperationException("活动宿主已改变，未打开旧宿主控制台。");
+
+            _vm = new ConsoleViewModel(session, _hostCoordinator);
             this.DataContext = _vm;
             InitializeComponent();
             if (App.PerformanceMode)
@@ -56,7 +65,16 @@ namespace ExHyperV.Views
                 WindowBackdropType = WindowBackdropType.None;
                 SetResourceReference(BackgroundProperty, "ApplicationBackgroundBrush");
             }
-            this.Title = vmName;
+            this.Title = $"{session.VmName} - {session.Target.DisplayName}";
+            _hostCoordinator.StateChanged += OnActiveHostStateChanged;
+            if (!_hostCoordinator.CanUseConsole(session.Stamp))
+            {
+                _hostCoordinator.StateChanged -= OnActiveHostStateChanged;
+                _vm.Dispose();
+                _rdpTornDown = true;
+                RdpHost.ShutdownAndDispose();
+                throw new InvalidOperationException("活动宿主已改变，未打开旧宿主控制台。");
+            }
 
             // TitleBar 关闭按钮直调 Window.Close() 绕过 _closing；关闭时 ShutdownAndDispose 的 DoEvents
             // 会泵到排队的 UIA 关闭 Invoke，对已在关闭的窗口二次 Close → VerifyNotClosing 抛。库层拦不到，在此吞掉。
@@ -113,10 +131,13 @@ namespace ExHyperV.Views
                 }
                 // VM 停止 / 掉线：保持窗口、黑布盖住（RdpClientHost 在断开时自动盖布）；由状态轮询在 VM 运行时自动重连。
                 // 关闭控制台由用户点窗口关闭按钮完成（不从断开推断，避免 VM 停止误关）。
+                _ = _vm.ReportUnexpectedConnectionLossAsync($"远程控制台连接意外中断，RDP reason={reason}。");
             }));
             RdpHost.FatalError += code => Dispatcher.BeginInvoke(new Action(() =>
             {
                 System.Diagnostics.Debug.WriteLine($"[Rdp] 致命错误 code={code}");   // 黑布由 RdpClientHost 在断开时自动盖住，等轮询重连
+                if (!_closing && !_weInitiatedDisconnect && !_enhancedConnecting)
+                    _ = _vm.ReportUnexpectedConnectionLossAsync($"远程控制台发生致命错误，RDP code={code}。");
             }));
             RdpHost.RemoteSizeChanged += (w, h) => Dispatcher.BeginInvoke(new Action(() =>
             {
@@ -185,6 +206,21 @@ namespace ExHyperV.Views
         // 经 Dispatcher 兜底确保在 UI 线程执行（SyncConnection 会碰 RdpHost）。
         private void OnVmPolled() => Dispatcher.BeginInvoke(new Action(() => SyncConnection(forceReconnect: false)));
 
+        private void OnActiveHostStateChanged(object? sender, ActiveHostStateChangedEventArgs e)
+        {
+            if (e.Current.ActiveSession.ConsoleChannel == HostChannelState.Available
+                && !e.Current.ActiveSession.HasStaleData
+                && _hostCoordinator.CanUseConsole(_session.Stamp))
+                return;
+
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (_closing) return;
+                _closing = true;
+                Close();
+            }));
+        }
+
         private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
         {
             switch (e.PropertyName)
@@ -225,6 +261,15 @@ namespace ExHyperV.Views
         private void SyncConnection(bool forceReconnect)
         {
             if (_closing) return;   // 正在关闭：不再重连（避免连接栏关闭后被轮询重连"复活"）
+            if (!_hostCoordinator.CanUseConsole(_session.Stamp))
+            {
+                if (RdpHost.ConnectionState != 0)
+                {
+                    _weInitiatedDisconnect = true;
+                    RdpHost.Disconnect();
+                }
+                return;
+            }
             if (forceReconnect && RdpHost.ConnectionState != 0)
             {
                 // 已连接要换 PCB（模式切换）：先断，等 OnDisconnected 断完再连——立即连会被 mstscax 拒、拖到轮询。
@@ -240,7 +285,7 @@ namespace ExHyperV.Views
                 {
                     _enhancedConnecting = _vm.IsEnhancedMode;   // 记下本次是否在尝试增强（失败则回退基本）
                     uint desktopScale = (uint)Math.Clamp(Math.Round(GetDpiScale() * 100.0), 100, 500);
-                    RdpHost.Connect(BuildHyperVSettings(_vm.VmId, _vm.IsEnhancedMode, _vm.CurrentWidth, _vm.CurrentHeight, desktopScale));
+                    RdpHost.Connect(BuildHyperVSettings(_session, _vm.IsEnhancedMode, _vm.CurrentWidth, _vm.CurrentHeight, desktopScale));
                 }
             }
             else if (RdpHost.ConnectionState != 0)   // VM 停了但还连着 → 断（保持窗口，等轮询到 VM 重启再连）
@@ -251,13 +296,13 @@ namespace ExHyperV.Views
         }
 
         // Hyper-V 控制台连接配方（消费层组装；增强沿用当前分辨率作初始尺寸，避免切换跳变）。
-        private static RdpConnectionSettings BuildHyperVSettings(string vmId, bool enhanced, int reuseWidth, int reuseHeight, uint desktopScale)
+        private static RdpConnectionSettings BuildHyperVSettings(ActiveHostConsoleSession session, bool enhanced, int reuseWidth, int reuseHeight, uint desktopScale)
         {
-            var id = (vmId ?? string.Empty).Trim().ToUpperInvariant();
+            var id = session.VmId.ToString("D").ToUpperInvariant();
             return new RdpConnectionSettings
             {
-                Server = "localhost",
-                Port = 2179,
+                Server = session.Server,
+                Port = session.Port,
                 AuthenticationLevel = 0,
                 AuthenticationServiceClass = "Microsoft Virtual Console Service",
                 NetworkLevelAuthentication = true,
@@ -531,6 +576,7 @@ namespace ExHyperV.Views
         // ── CAD / 关闭 ──────────────────────────────────────────────────────
         private void OnSendCadRequested(object? sender, EventArgs e)
         {
+            if (!_session.Target.IsLocal) return;
             // CAD 按钮仅基本会话显示（增强会话 RDP 无法程序化发 SAS、按钮已隐藏）→ 这里只走基本会话的 WMI 硬件键盘。
             _ = VmInputService.SendCtrlAltDelAsync(_vm.VmId);
         }
@@ -579,6 +625,7 @@ namespace ExHyperV.Views
             _vm.SendCadRequested -= OnSendCadRequested;
             _vm.PropertyChanged -= OnViewModelPropertyChanged;
             _vm.Polled -= OnVmPolled;
+            _hostCoordinator.StateChanged -= OnActiveHostStateChanged;
             _vm.Dispose();
 
             // 延到 idle 再摘钩：兜住关闭 Invoke 排在 OnClosed 之后才跑的时序，之后解绑不泄漏本窗口。

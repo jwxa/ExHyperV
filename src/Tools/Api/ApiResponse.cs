@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 
 namespace ExHyperV.Tools;
 
@@ -14,12 +14,24 @@ public enum ApiErrorSource
     Com,
 }
 
+public sealed class ApiResponseException(
+    string message,
+    int code,
+    ApiErrorSource errorSource,
+    Exception? innerException = null) : Exception(message, innerException)
+{
+    public int Code { get; } = code;
+    public ApiErrorSource ErrorSource { get; } = errorSource;
+}
+
 // ══════════════════════════════════════════════════════════════════
 //  泛型结果类型 ApiResponse<T>
 //  用于有数据返回的场景：查询、读取
 // ══════════════════════════════════════════════════════════════════
 public class ApiResponse<T>
 {
+    private Exception? Cause { get; init; }
+
     public bool Success { get; init; }
     public bool IsEmpty { get; init; }
     public T? Data { get; init; }
@@ -28,7 +40,7 @@ public class ApiResponse<T>
     public ApiErrorSource ErrorSource { get; init; }
 
 #if DEBUG
-    public Exception? Exception { get; init; }
+    public Exception? Exception => Cause;
 #endif
 
     public static ApiResponse<T> Ok(T data) => new()
@@ -59,13 +71,18 @@ public class ApiResponse<T>
             Error = error,
             Code = code,
             ErrorSource = source,
-#if DEBUG
-            Exception = exception,
-#endif
+            Cause = exception,
         };
     }
 
     public bool HasData => Success && !IsEmpty && Data is not null;
+
+    public ApiResponseException ToException(string? prefix = null) => new(
+        string.IsNullOrWhiteSpace(prefix) ? Error : $"{prefix}：{Error}",
+        Code,
+        ErrorSource,
+        Cause
+    );
 
     public static implicit operator bool(ApiResponse<T>? response) => response is not null && response.Success;
 
@@ -81,13 +98,15 @@ public class ApiResponse<T>
 // ══════════════════════════════════════════════════════════════════
 public sealed class ApiResponse
 {
+    private Exception? Cause { get; init; }
+
     public bool Success { get; init; }
     public string Error { get; init; } = string.Empty;
     public int Code { get; init; }
     public ApiErrorSource ErrorSource { get; init; }
 
 #if DEBUG
-    public Exception? Exception { get; init; }
+    public Exception? Exception => Cause;
 #endif
 
     public static ApiResponse Ok() => new() { Success = true };
@@ -105,13 +124,18 @@ public sealed class ApiResponse
             Error = error,
             Code = code,
             ErrorSource = source,
-#if DEBUG
-            Exception = exception,
-#endif
+            Cause = exception,
         };
     }
 
     public static implicit operator bool(ApiResponse? response) => response is not null && response.Success;
+
+    public ApiResponseException ToException(string? prefix = null) => new(
+        string.IsNullOrWhiteSpace(prefix) ? Error : $"{prefix}：{Error}",
+        Code,
+        ErrorSource,
+        Cause
+    );
 
     public override string ToString() =>
         Success

@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Models;
 using ExHyperV.Services;
+using ExHyperV.Services.Remote.Sessions;
 using ExHyperV.Tools;
 using Wpf.Ui.Controls;
 
@@ -58,6 +59,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task GoToAdvancedSettingsAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (SelectedVm == null) return;
             CurrentViewType = VmDetailViewType.Advanced;
             IsLoadingSettings = true;
@@ -155,6 +157,8 @@ namespace ExHyperV.ViewModels
         private async Task ApplySyntheticBatteryAsync(bool enabled)
         {
             if (SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             var vm = SelectedVm;
             bool previous = _appliedSyntheticBatteryEnabled;
             var (success, message) = await VmBatteryService.SetEnabledAsync(vm.Name, enabled);
@@ -175,7 +179,8 @@ namespace ExHyperV.ViewModels
         }
 
         private bool CanApplyAdvancedBehavior(bool available)
-            => !IsApplySuppressed
+            => HasHostCapability(HostCapabilityKind.VmAdvancedSettings)
+               && !IsApplySuppressed
                && CurrentViewType == VmDetailViewType.Advanced
                && SelectedVm != null
                && available;
@@ -183,6 +188,8 @@ namespace ExHyperV.ViewModels
         private async Task ApplyAdvancedBehaviorAsync(VmAdvancedBehavior behavior, bool value)
         {
             if (SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             var vm = SelectedVm;
             bool previous = GetAppliedAdvancedBehavior(behavior);
 
@@ -265,12 +272,16 @@ namespace ExHyperV.ViewModels
 
         partial void OnIsConsoleSupportEnabledChanged(bool value)
         {
-            if (IsApplySuppressed || SelectedVm == null) return;
+            if (!HasHostCapability(HostCapabilityKind.VmAdvancedSettings)
+                || IsApplySuppressed || SelectedVm == null) return;
             _ = ApplyConsoleSupportAsync(value);
         }
 
         private async Task ApplyConsoleSupportAsync(bool enable)
         {
+            if (SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             var (ok, msg) = await VmConsoleService.SetConsoleSupportAsync(SelectedVm.Name, enable);
             if (ok)
             {
@@ -287,12 +298,16 @@ namespace ExHyperV.ViewModels
 
         partial void OnIsBootNumLockEnabledChanged(bool value)
         {
-            if (IsApplySuppressed || SelectedVm == null) return;
+            if (!HasHostCapability(HostCapabilityKind.VmAdvancedSettings)
+                || IsApplySuppressed || SelectedVm == null) return;
             _ = ApplyBootNumLockAsync(value);
         }
 
         private async Task ApplyBootNumLockAsync(bool enable)
         {
+            if (SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             var (ok, msg) = await VmBootService.SetBootNumLockAsync(SelectedVm.Name, enable);
             if (ok)
                 ShowSuccess($"{Properties.Resources.VmAdvanced_NumLockTitle}：{(enable ? Properties.Resources.Button_Enable : Properties.Resources.Common_Disabled)}");
@@ -308,6 +323,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task ApplyVideoResolutionAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (SelectedVm == null) return;
             string text = (SelectedVideoResolution ?? string.Empty).Trim();
             int type, w = 0, h = 0;
@@ -329,6 +345,8 @@ namespace ExHyperV.ViewModels
                 type = 3; // Single(固定)
             }
 
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             var (ok, msg) = await VmVideoService.SetResolutionAsync(SelectedVm.Name, type, w, h);
             if (ok)
             {

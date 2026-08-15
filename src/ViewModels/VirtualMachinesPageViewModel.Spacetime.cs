@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Models;
 using ExHyperV.Services;
+using ExHyperV.Services.Remote.Sessions;
 using Wpf.Ui.Controls;
 
 namespace ExHyperV.ViewModels
@@ -34,11 +35,17 @@ namespace ExHyperV.ViewModels
 
         partial void OnIsCheckpointsEnabledChanged(bool value)
         {
-            if (IsApplySuppressed || SelectedVm == null) return;
+            if (!HasHostCapability(HostCapabilityKind.VmAdvancedSettings)
+                || IsApplySuppressed
+                || CurrentViewType != VmDetailViewType.SpacetimeSettings
+                || SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            string vmName = SelectedVm.Name;
 
             _ = Task.Run(async () =>
             {
-                var result = await VmSpacetimeService.SetCheckpointsEnabledAsync(SelectedVm.Name, value);
+                using var writeScope = writeLease;
+                var result = await VmSpacetimeService.SetCheckpointsEnabledAsync(vmName, value);
                 if (!result.Success)
                 {
                     // 失败时回滚 UI 状态
@@ -77,6 +84,8 @@ namespace ExHyperV.ViewModels
 
             // 起源和当前节点禁止改名
             if (node.IsLogicalNode) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             IsLoadingSettings = true;
             try
@@ -106,6 +115,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task GoToSpacetimeSettingsAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (SelectedVm == null) return;
             CurrentViewType = VmDetailViewType.SpacetimeSettings;
             IsLoadingSettings = true;
@@ -158,6 +168,8 @@ namespace ExHyperV.ViewModels
         {
             if (SelectedVm == null) return;
             if (HasOpenWormhole) return;   // 双保险:虫洞开着不许创建——按钮已置灰,避免把含临时盘的脏配置拍进检查点
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             var currentFrame = SelectedVm.Thumbnail;
 
@@ -196,6 +208,8 @@ namespace ExHyperV.ViewModels
         private async Task Teleport()
         {
             if (SelectedSpacetimeNode == null || SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             IsLoadingSettings = true;
             try
             {
@@ -234,6 +248,8 @@ namespace ExHyperV.ViewModels
         private async Task Annihilate()
         {
             if (SelectedSpacetimeNode == null || SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             IsLoadingSettings = true;
             try
@@ -258,6 +274,8 @@ namespace ExHyperV.ViewModels
         private async Task OpenWormhole()
         {
             if (SelectedSpacetimeNode == null || SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             IsLoadingSettings = true;
             try
             {
@@ -282,6 +300,8 @@ namespace ExHyperV.ViewModels
         private async Task CloseWormhole()
         {
             if (SelectedSpacetimeNode == null || SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             IsLoadingSettings = true;
             try
             {
@@ -304,6 +324,8 @@ namespace ExHyperV.ViewModels
         private async Task Convergence()
         {
             if (SelectedSpacetimeNode == null || SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             // 同样改为局部加载
             IsLoadingSettings = true;

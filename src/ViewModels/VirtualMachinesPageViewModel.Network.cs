@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ExHyperV.Models;
 using ExHyperV.Services;
+using ExHyperV.Services.Remote.Sessions;
 using ExHyperV.Tools;
 using Wpf.Ui.Controls;
 
@@ -48,6 +49,7 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task GoToNetworkSettingsAsync()
         {
+            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (SelectedVm == null) return;
 
             CurrentViewType = VmDetailViewType.NetworkSettings;
@@ -157,6 +159,7 @@ namespace ExHyperV.ViewModels
         // 网卡操作失败后从后端重新拉取真实状态覆盖 UI（回滚"撒谎"的开关；复用智能同步避免闪烁）
         private async Task RevertAdaptersFromBackendAsync()
         {
+            if (!HasHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (SelectedVm == null) return;
             try
             {
@@ -171,6 +174,8 @@ namespace ExHyperV.ViewModels
         private async Task AddNetworkAdapterAsync()
         {
             if (SelectedVm == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             IsLoadingSettings = true;
             try
             {
@@ -201,6 +206,8 @@ namespace ExHyperV.ViewModels
         private async Task RemoveNetworkAdapterAsync(string adapterId)
         {
             if (SelectedVm == null || string.IsNullOrEmpty(adapterId)) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             IsLoadingSettings = true;
             try
@@ -244,6 +251,8 @@ namespace ExHyperV.ViewModels
                 ShowTip(Properties.Resources.Msg_Net_CreateSwitchFirst);
                 return;
             }
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
 
             IsLoadingSettings = true;
             try
@@ -266,6 +275,8 @@ namespace ExHyperV.ViewModels
         private async Task ApplyMacAddressAsync(VmNetworkAdapter adapter)
         {
             if (SelectedVm == null || adapter == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             IsLoadingSettings = true;
             try
             {
@@ -288,6 +299,8 @@ namespace ExHyperV.ViewModels
         private async Task ApplyVlanSettingsAsync(VmNetworkAdapter adapter)
         {
             if (SelectedVm == null || adapter == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             IsLoadingSettings = true;
             try
             {
@@ -306,6 +319,8 @@ namespace ExHyperV.ViewModels
         private async Task ApplyQosSettingsAsync(VmNetworkAdapter adapter)
         {
             if (SelectedVm == null || adapter == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             IsLoadingSettings = true;
             try
             {
@@ -324,6 +339,8 @@ namespace ExHyperV.ViewModels
         private async Task ApplySecuritySettingsAsync(VmNetworkAdapter adapter)
         {
             if (SelectedVm == null || adapter == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             IsLoadingSettings = true;
             try
             {
@@ -355,6 +372,8 @@ namespace ExHyperV.ViewModels
         {
             if (CurrentViewType != VmDetailViewType.NetworkSettings) return; // 同上：挡导航离开时开关卸载的误触发
             if (SelectedVm == null || adapter == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             var result = await VmNetworkService.ApplyOffloadSettingsAsync(SelectedVm.Name, adapter);
             if (!result.Success)
             {
@@ -369,6 +388,8 @@ namespace ExHyperV.ViewModels
         {
             if (CurrentViewType != VmDetailViewType.NetworkSettings) return; // 同上：挡导航离开时开关卸载的误触发
             if (SelectedVm == null || adapter == null) return;
+            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            using var writeScope = writeLease;
             var result = await VmNetworkService.ApplySecuritySettingsAsync(SelectedVm.Name, adapter);
             if (!result.Success)
             {

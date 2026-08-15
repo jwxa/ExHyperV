@@ -1,9 +1,14 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
 using System.Xml.Linq;
+using ExHyperV.Services.Logging;
+using ExHyperV.Services.Remote.Credentials;
+using ExHyperV.Services.Remote.Diagnostics;
+using ExHyperV.Services.Remote.Sessions;
+using ExHyperV.Services.Remote.Windows;
 using ExHyperV.Tools; 
 
 namespace ExHyperV;
@@ -33,6 +38,11 @@ public partial class App
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        AppLog.Initialize();
+        var credentialStore = new WindowsCredentialStore();
+        ActiveHostSessions.Configure(
+            new WindowsHostSessionConnector(new HostIdentityResolver(credentialStore)),
+            new WindowsHostBasicSnapshotLoader());
         base.OnStartup(e);
 
         string targetLanguage;
@@ -55,12 +65,15 @@ public partial class App
             WriteLanguageToConfig(targetLanguage);
         }
         SetLanguage(targetLanguage);
+        AppLog.Information("应用", $"ExHyperV 已启动，界面语言={targetLanguage}。");
     }
     protected override void OnExit(ExitEventArgs e)
     {
         // 主动停掉 ARP 嗅探的 ETW 会话：赶在 CLR 硬终止后台线程之前、在受控时机清理，
         // 否则 pump 线程卡在 native ProcessTrace 会吊死整个进程退出。Service 内 ProcessExit 注册留作兜底。
         ExHyperV.Services.ArpSnoopService.Instance.Dispose();
+        ActiveHostSessions.Current.Shutdown();
+        AppLog.Shutdown();
         base.OnExit(e);
     }
 

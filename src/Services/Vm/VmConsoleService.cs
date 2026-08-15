@@ -32,12 +32,15 @@ public static class VmConsoleService
     }
 
     // EnhancedSessionModeState：2=可用，3=禁用，6=已启用但来宾尚未就绪。
-    public static async Task<bool> IsEnhancedSessionAvailableAsync(string vmName)
+    public static async Task<bool> IsEnhancedSessionAvailableAsync(
+        string vmName,
+        WmiContext? context = null)
     {
         if (string.IsNullOrEmpty(vmName)) return false;
         var resp = await WmiApi.QueryFirstAsync(
             $"SELECT EnhancedSessionModeState FROM Msvm_ComputerSystem WHERE ElementName = '{WmiApi.Escape(vmName)}'",
-            obj => obj["EnhancedSessionModeState"] is { } v ? Convert.ToUInt16(v) : (ushort)3);
+            obj => obj["EnhancedSessionModeState"] is { } v ? Convert.ToUInt16(v) : (ushort)3,
+            ctx: context);
         return resp.HasData && resp.Data == 2;   // 2 = Available
     }
 

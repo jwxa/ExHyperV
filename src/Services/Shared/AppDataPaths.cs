@@ -4,9 +4,12 @@ namespace ExHyperV.Services;
 
 internal static class AppDataPaths
 {
-    internal static string ConfigFilePath { get; } = ResolveConfigFilePath();
+    private static readonly string AppDataDirectory = ResolveAppDataDirectory();
 
-    private static string ResolveConfigFilePath()
+    internal static string ConfigFilePath { get; } = Path.Combine(AppDataDirectory, "Config.xml");
+    internal static string HostProfilesFilePath { get; } = Path.Combine(AppDataDirectory, "Hosts.xml");
+
+    private static string ResolveAppDataDirectory()
     {
         string appDataDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -16,6 +19,6 @@ internal static class AppDataPaths
         try { Directory.CreateDirectory(appDataDirectory); }
         catch { }
 
-        return Path.Combine(appDataDirectory, "Config.xml");
+        return appDataDirectory;
     }
 }

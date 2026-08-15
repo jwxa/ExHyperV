@@ -9,6 +9,9 @@
 # Local tool homes / temporary sandbox artifacts
 .dotnet/
 .dotnet_home/
+.codex-tasks/tooling/
+.codex-tasks/**/raw/
+tests/**/.codex-tasks/
 
 # Patch / merge leftovers
 *.orig
