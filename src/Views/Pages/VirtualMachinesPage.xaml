@@ -759,7 +759,7 @@
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
                                 <StackPanel>
-                                    <Grid Margin="8,10,8,4">
+                                    <Grid Margin="8,10,8,4" ToolTip="{Binding StatusText}">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto"/>
                                             <ColumnDefinition Width="*"/>

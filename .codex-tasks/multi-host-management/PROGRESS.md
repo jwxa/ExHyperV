@@ -6,8 +6,8 @@
 - 跟踪规格：[GitHub Issue #14](https://github.com/jwxa/ExHyperV/issues/14)，标签 `ready-for-agent`。
 - 实施 Issues：[#15](https://github.com/jwxa/ExHyperV/issues/15) 至 [#22](https://github.com/jwxa/ExHyperV/issues/22)，均为 OPEN 且带 `ready-for-agent`。
 - 实施状态：进行中。
-- 已完成：[#15 扩展宿主身份与多会话注册表](https://github.com/jwxa/ExHyperV/issues/15)、[#16 本机与首台远程并列管理](https://github.com/jwxa/ExHyperV/issues/16)、[#17 多台远程宿主与隔离操作](https://github.com/jwxa/ExHyperV/issues/17)。
-- 下一任务：[#18 旧数据与每宿主独立自动重连](https://github.com/jwxa/ExHyperV/issues/18)。
+- 已完成：[#15 扩展宿主身份与多会话注册表](https://github.com/jwxa/ExHyperV/issues/15)、[#16 本机与首台远程并列管理](https://github.com/jwxa/ExHyperV/issues/16)、[#17 多台远程宿主与隔离操作](https://github.com/jwxa/ExHyperV/issues/17)、[#18 旧数据与每宿主独立自动重连](https://github.com/jwxa/ExHyperV/issues/18)。
+- 下一任务：[#19 安全断开宿主及其控制台](https://github.com/jwxa/ExHyperV/issues/19)。
 - 其他 frontier：[#20 当前宿主实时脱敏日志](https://github.com/jwxa/ExHyperV/issues/20)。
 - 规格来源：`doc/multi-host-management-spec.md`。
 - 设计来源：`doc/multi-host-management-design.md`。
@@ -26,11 +26,13 @@
 - #16 受控宿主只读验收通过：`10.0.0.6` 的 WMI/DCOM、TCP 2179、1 台 VM 查询和控制台捕获成功；7 项通过、6 项安全跳过、0 失败，所有危险开关为 `false`。
 - 已建立 #17 的 Full Single 子任务；测试边界覆盖三宿主稳定顺序、每宿主独立刷新、远程 A/B 操作隔离和单宿主选择域。
 - #17 已完成：全部宿主按稳定顺序投影，每宿主并行刷新并持有独立监控与取消范围；A/B 写租约和代次相互隔离，跨宿主选择收敛为单一 `HostId`；204/204 测试、Release 构建、UTF-8、凭据模式和差异检查通过。
+- 已建立 #18 的 Full Single 子任务；测试边界覆盖目标宿主旧数据隔离、A/B 并行重连、按 `HostId` 立即重试/停止和 VM 分组旧数据提示。
+- #18 已完成：目标宿主旧数据、写入/控制台门禁和唯一重连任务与其他宿主隔离；立即重试、停止和恢复均按 `HostId` 路由；VM 分组通过现有警告色和 Tooltip 说明旧数据；209/209 测试、Release 构建、UTF-8、凭据模式和差异检查通过。
 
 ## 下一步
 
-1. 开始 #18，补充旧数据展示与每宿主独立自动重连交互。
-2. #19 和 #20 保持为并行可领取 frontier。
+1. 开始 #19，实现安全主动断开及控制台确认事务。
+2. #20 保持为并行可领取 frontier。
 3. 每个任务完成后立即更新 `SUBTASKS.csv` 和本文件，不集中到最后补记。
 
 ## 注意事项

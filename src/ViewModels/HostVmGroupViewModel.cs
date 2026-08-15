@@ -32,6 +32,7 @@ public partial class HostVmGroupViewModel : ObservableObject, IDisposable
         HostCapabilityMatrix.Create(ActiveHostSession.CreateLocal(), isSwitching: false);
     [ObservableProperty] private bool _isLoading;
     [ObservableProperty] private string _loadError = string.Empty;
+    public HostReconnectState Reconnect { get; private set; } = HostReconnectState.None;
 
     public bool IsHealthy =>
         ManagementChannel == HostChannelState.Available && !HasStaleData;
@@ -40,6 +41,35 @@ public partial class HostVmGroupViewModel : ObservableObject, IDisposable
         !IsHealthy && (HasStaleData || ConnectionState == HostConnectionState.Reconnecting);
 
     public bool IsUnavailable => !IsHealthy && !IsWarning;
+
+    public string StatusText
+    {
+        get
+        {
+            if (IsLocal) return "本地计算机已连接。";
+            if (HasStaleData)
+            {
+                if (!Reconnect.IsActive)
+                    return "自动重连已停止；当前显示断线前的旧数据。";
+                if (Reconnect.NextAttemptAt is { } nextAttempt)
+                    return $"第 {Reconnect.Attempt} 次重连失败；将在 {nextAttempt.ToLocalTime():HH:mm:ss} 再次尝试。当前显示断线前的旧数据。";
+                return "连接已中断，正在自动重连；当前显示断线前的旧数据。";
+            }
+
+            return ConnectionState switch
+            {
+                HostConnectionState.Connected => "远程宿主已连接。",
+                HostConnectionState.PartiallyAvailable =>
+                    Capabilities[HostCapabilityKind.VmConsole].CanExecute
+                        ? "远程宿主部分可用。"
+                        : Capabilities[HostCapabilityKind.VmConsole].Reason,
+                HostConnectionState.RemoteDisconnected => "远程宿主已断开。",
+                HostConnectionState.Reconnecting => "正在重新连接远程宿主。",
+                HostConnectionState.Failed => "远程宿主连接失败。",
+                _ => "远程宿主状态未知。"
+            };
+        }
+    }
 
     public void ApplySession(HostSessionSnapshot session)
     {
@@ -53,9 +83,11 @@ public partial class HostVmGroupViewModel : ObservableObject, IDisposable
         ManagementChannel = session.ManagementChannel;
         HasStaleData = session.HasStaleData;
         Capabilities = session.Capabilities;
+        Reconnect = session.Reconnect;
         OnPropertyChanged(nameof(IsHealthy));
         OnPropertyChanged(nameof(IsWarning));
         OnPropertyChanged(nameof(IsUnavailable));
+        OnPropertyChanged(nameof(StatusText));
     }
 
     public void Dispose()
