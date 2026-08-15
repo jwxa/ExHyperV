@@ -38,6 +38,8 @@ public partial class App
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        // AzureFeatureSet 仅作为进程管理的宿主临时租约；在日志、凭据和本机 Hyper-V 会话启动前清理残值。
+        ExHyperV.Services.HostAzureFeatureSetService.EnsureDisabledAtRest();
         AppLog.Initialize();
         var credentialStore = new WindowsCredentialStore();
         HostSessions.Configure(
@@ -69,6 +71,7 @@ public partial class App
     }
     protected override void OnExit(ExitEventArgs e)
     {
+        ExHyperV.Services.HostAzureFeatureSetService.EnsureDisabledAtRest();
         // 主动停掉 ARP 嗅探的 ETW 会话：赶在 CLR 硬终止后台线程之前、在受控时机清理，
         // 否则 pump 线程卡在 native ProcessTrace 会吊死整个进程退出。Service 内 ProcessExit 注册留作兜底。
         ExHyperV.Services.ArpSnoopService.Instance.Dispose();

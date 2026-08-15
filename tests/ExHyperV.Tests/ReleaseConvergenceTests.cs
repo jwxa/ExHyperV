@@ -6,6 +6,9 @@ internal static class ReleaseConvergenceTests
         ("Release_LocalCapabilitiesUseExplicitLocalHost", LocalCapabilitiesUseExplicitLocalHost),
         ("Release_ControlledRunnerUsesMultiHostRegistry", ControlledRunnerUsesMultiHostRegistry),
         ("Release_RemoteSurfacesUseThemeResources", RemoteSurfacesUseThemeResources),
+        ("Release_AzureLeasePreservesRemotePowerRouting", AzureLeasePreservesRemotePowerRouting),
+        ("Release_PermanentAzureToggleIsRemoved", PermanentAzureToggleIsRemoved),
+        ("Release_LocalFolderAndPurgeSafetyAreWired", LocalFolderAndPurgeSafetyAreWired),
         ("Release_UserDocsDescribeMultiHostBehavior", UserDocsDescribeMultiHostBehavior)
     ];
 
@@ -77,6 +80,66 @@ internal static class ReleaseConvergenceTests
             "The VM detail monitor still uses a hardcoded black background.");
         TestAssert.Contains("ControlFillColorSecondaryBrush", hostPage);
         TestAssert.Contains("ControlFillColorSecondaryBrush", vmPage);
+    }
+
+    private static void AzureLeasePreservesRemotePowerRouting()
+    {
+        string source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(), "src", "Services", "Vm", "VmPowerService.cs"));
+        int startCase = source.IndexOf("case \"Start\":", StringComparison.Ordinal);
+        int turnOffCase = source.IndexOf("case \"TurnOff\":", startCase, StringComparison.Ordinal);
+        TestAssert.True(startCase >= 0 && turnOffCase > startCase, "Could not isolate the VM start branch.");
+        string branch = source[startCase..turnOffCase];
+
+        TestAssert.Contains("ctx: context", branch);
+        TestAssert.Contains("cancellationToken: cancellationToken", branch);
+        TestAssert.Contains("context.IsLocal", branch);
+        TestAssert.Contains("RunTemporarilyDisabledAsync(StartAsync)", branch);
+        TestAssert.Contains(": await StartAsync()", branch);
+    }
+
+    private static void PermanentAzureToggleIsRemoved()
+    {
+        string root = FindRepositoryRoot();
+        string productSource = ReadSourceTree(Path.Combine(root, "src"));
+        string hostPage = File.ReadAllText(Path.Combine(root, "src", "Views", "Pages", "HostPage.xaml"));
+        string resources = File.ReadAllText(Path.Combine(root, "src", "Properties", "Resources.resx"));
+
+        TestAssert.False(
+            productSource.Contains("AzureFeatureSetChangedMessage", StringComparison.Ordinal),
+            "产品源码不应继续引用永久 Azure 功能集变更消息。");
+        TestAssert.False(
+            productSource.Contains("IsAzureFeatureSetEnabled", StringComparison.Ordinal),
+            "产品源码不应继续暴露永久 Azure 功能集状态。");
+        TestAssert.False(
+            productSource.Contains("HostAzureFeatureSetService.SetEnabled", StringComparison.Ordinal),
+            "产品源码不应继续调用永久 Azure 功能集开关。");
+        TestAssert.False(
+            hostPage.Contains("Menu_AzureFeatureSet", StringComparison.Ordinal),
+            "宿主页不应继续显示永久 Azure 功能集开关。");
+        TestAssert.False(
+            resources.Contains("Menu_AzureFeatureSet", StringComparison.Ordinal),
+            "资源文件不应继续保留永久 Azure 功能集菜单文案。");
+    }
+
+    private static void LocalFolderAndPurgeSafetyAreWired()
+    {
+        string root = FindRepositoryRoot();
+        string viewModel = File.ReadAllText(Path.Combine(
+            root, "src", "ViewModels", "VirtualMachinesPageViewModel.cs"));
+        string folderAccess = File.ReadAllText(Path.Combine(
+            root, "src", "Services", "Vm", "VmFolderAccessService.cs"));
+
+        TestAssert.Contains("VmFolderAccessService.EnsureExplorerCanRead(path)", viewModel);
+        TestAssert.Contains(".iso", viewModel);
+        TestAssert.Contains(".vhd", viewModel);
+        TestAssert.Contains(".vhdx", viewModel);
+        TestAssert.Contains("UiStatusBrushes.Critical", viewModel);
+        TestAssert.False(
+            viewModel.Contains("Color.FromRgb(232, 71, 86)", StringComparison.Ordinal),
+            "彻底删除预览应复用主题关键色，而不是硬编码 RGB 颜色。");
+        TestAssert.Contains("IsDefaultProtectedHyperVPath(fullPath)", folderAccess);
+        TestAssert.Contains("FileSystemRights.ReadAndExecute", folderAccess);
     }
 
     private static void UserDocsDescribeMultiHostBehavior()

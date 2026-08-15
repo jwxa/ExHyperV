@@ -40,10 +40,16 @@ namespace ExHyperV.Services
             switch (action)
             {
                 case "Start":
-                    return await WmiApi.InvokeAsync(wql, "RequestStateChange",
+                    Task<ApiResponse> StartAsync() => WmiApi.InvokeAsync(
+                        wql,
+                        "RequestStateChange",
                         p => p["RequestedState"] = (ushort)2,
                         ctx: context,
                         cancellationToken: cancellationToken);
+                    // AzureFeatureSet 是本机注册表状态；远程启动必须保留远程 WMI 上下文，不能修改客户端注册表。
+                    return context.IsLocal
+                        ? await HostAzureFeatureSetService.RunTemporarilyDisabledAsync(StartAsync)
+                        : await StartAsync();
 
                 case "TurnOff":
                     return await ForceTurnOffAsync(vmName, wql, context, cancellationToken);

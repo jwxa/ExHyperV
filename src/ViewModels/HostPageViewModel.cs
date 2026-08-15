@@ -38,7 +38,6 @@ namespace ExHyperV.ViewModels
         [ObservableProperty] private bool _isNativeNvmeToggleEnabled = false;
         [ObservableProperty] private bool _isNativeNvmeSupported;
         [ObservableProperty] private bool _isOpenHclFirmwareFileEnabled;
-        [ObservableProperty] private bool _isAzureFeatureSetEnabled;
         [ObservableProperty] private bool _isServerSystem;
         [ObservableProperty] private bool _isSystemSwitchEnabled = false;
 
@@ -125,7 +124,6 @@ namespace ExHyperV.ViewModels
             IsNativeNvmeSupported = Environment.OSVersion.Version.Build >= 26100; // WS2025 / Win11 24H2 起才有原生 NVMe
             IsNativeNvmeEnabled = await Task.Run(() => HostNvmeService.IsNativeNvmeEnabled());
             IsOpenHclFirmwareFileEnabled = await Task.Run(() => HostOpenHclService.IsFirmwareLoadFromFileEnabled());
-            IsAzureFeatureSetEnabled = await Task.Run(() => HostAzureFeatureSetService.IsEnabled());
             InitializeProductType();
             await LoadAdvancedConfigAsync();
             IsGpuStrategyToggleEnabled = true;
@@ -180,22 +178,6 @@ namespace ExHyperV.ViewModels
             ShowError(string.Format(Properties.Resources.Error_Host_OpenHclRegistryChangeFailed, result.Error));
             _isInitialized = false;
             IsOpenHclFirmwareFileEnabled = !value;
-            _isInitialized = true;
-        }
-
-        partial void OnIsAzureFeatureSetEnabledChanged(bool value)
-        {
-            if (!_isInitialized) return;
-            if (!TryBeginHostWrite(HostCapabilityKind.HostHardware, out IHostWriteLease? writeLease)) return;
-
-            (bool Success, string Error) result;
-            using (writeLease)
-                result = HostAzureFeatureSetService.SetEnabled(value);
-            if (result.Success) return;
-
-            ShowError(string.Format(Properties.Resources.Error_Host_AzureFeatureSetChangeFailed, result.Error));
-            _isInitialized = false;
-            IsAzureFeatureSetEnabled = !value;
             _isInitialized = true;
         }
 
