@@ -35,6 +35,7 @@ namespace ExHyperV.Views
             if (_isSynchronizingVmSelection
                 || e.AddedItems.Count == 0
                 || sender is not System.Windows.Controls.ListView lv
+                || lv.DataContext is not HostVmGroupViewModel group
                 || DataContext is not VirtualMachinesPageViewModel vm)
                 return;
 
@@ -45,7 +46,7 @@ namespace ExHyperV.Views
                 {
                     if (!ReferenceEquals(other, lv)) other.UnselectAll();
                 }
-                vm.UpdateSelection(lv.SelectedItems);
+                vm.UpdateSelection(group.HostId, lv.SelectedItems);
             }
             finally
             {

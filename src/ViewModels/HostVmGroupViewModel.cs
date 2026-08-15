@@ -4,8 +4,11 @@ using ExHyperV.Services.Remote.Sessions;
 
 namespace ExHyperV.ViewModels;
 
-public partial class HostVmGroupViewModel : ObservableObject
+public partial class HostVmGroupViewModel : ObservableObject, IDisposable
 {
+    private readonly CancellationTokenSource _operationCancellation = new();
+    private int _isDisposed;
+
     public HostVmGroupViewModel(HostSessionSnapshot session, int order)
     {
         ArgumentNullException.ThrowIfNull(session);
@@ -17,6 +20,7 @@ public partial class HostVmGroupViewModel : ObservableObject
     public HostId HostId { get; }
     public int Order { get; }
     public bool IsLocal => HostId.IsLocal;
+    public CancellationToken OperationToken => _operationCancellation.Token;
     public ObservableCollection<VmInstanceViewModel> Vms { get; } = [];
 
     [ObservableProperty] private string _displayName = string.Empty;
@@ -52,5 +56,12 @@ public partial class HostVmGroupViewModel : ObservableObject
         OnPropertyChanged(nameof(IsHealthy));
         OnPropertyChanged(nameof(IsWarning));
         OnPropertyChanged(nameof(IsUnavailable));
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _isDisposed, 1) != 0) return;
+        _operationCancellation.Cancel();
+        _operationCancellation.Dispose();
     }
 }

@@ -5,7 +5,10 @@ internal static class VirtualMachinesMultiHostWiringTests
         ("VmPage_ExposesLocalFirstHostGroups", ExposesLocalFirstHostGroups),
         ("VmPage_AssignsOwningHostIdentityToRows", AssignsOwningHostIdentityToRows),
         ("VmPage_RoutesReadsAndWritesByOwningHost", RoutesReadsAndWritesByOwningHost),
-        ("VmPage_XamlGroupsRowsByHost", XamlGroupsRowsByHost)
+        ("VmPage_XamlGroupsRowsByHost", XamlGroupsRowsByHost),
+        ("VmPage_ProjectsEveryConnectedHostInRegistryOrder", ProjectsEveryConnectedHostInRegistryOrder),
+        ("VmPage_RemoteGroupsRefreshIndependently", RemoteGroupsRefreshIndependently),
+        ("VmPage_SelectionScopeCarriesOneHostId", SelectionScopeCarriesOneHostId)
     ];
 
     private static void ExposesLocalFirstHostGroups()
@@ -13,7 +16,7 @@ internal static class VirtualMachinesMultiHostWiringTests
         string source = ReadSource("ViewModels", "VirtualMachinesPageViewModel.cs");
 
         TestAssert.Contains("ObservableCollection<HostVmGroupViewModel> _hostGroups", source);
-        TestAssert.Contains("EnsureHostGroup(HostSessionSnapshot.CreateLocal())", source);
+        TestAssert.Contains("foreach (HostSessionSnapshot session in _sessionRegistry.Current.Hosts)", source);
         TestAssert.Contains("HostGroups.Insert(0", source);
     }
 
@@ -45,6 +48,43 @@ internal static class VirtualMachinesMultiHostWiringTests
         TestAssert.Contains("ItemsSource=\"{Binding Vms}\"", xaml);
         TestAssert.Contains("DisplayName", xaml);
         TestAssert.Contains("DisplayAddress", xaml);
+    }
+
+    private static void ProjectsEveryConnectedHostInRegistryOrder()
+    {
+        string source = ReadSource("ViewModels", "VirtualMachinesPageViewModel.cs");
+
+        TestAssert.Contains("foreach (HostSessionSnapshot session in _sessionRegistry.Current.Hosts)", source);
+        TestAssert.False(
+            source.Contains("FirstOrDefault(host => !host.HostId.IsLocal)", StringComparison.Ordinal),
+            "The VM page still projects only the first connected remote host.");
+        TestAssert.False(
+            source.Contains("HostGroups.Any(candidate => !candidate.IsLocal)", StringComparison.Ordinal),
+            "A second connected remote host is still discarded by the VM page.");
+    }
+
+    private static void RemoteGroupsRefreshIndependently()
+    {
+        string source = ReadSource("ViewModels", "VirtualMachinesPageViewModel.cs");
+
+        TestAssert.Contains("Task.WhenAll(", source);
+        TestAssert.Contains("MonitorRemoteStateLoop(HostVmGroupViewModel group,", source);
+        TestAssert.Contains("StartRemoteMonitoring(group)", source);
+        TestAssert.False(
+            source.Contains("FirstOrDefault(candidate => !candidate.IsLocal)", StringComparison.Ordinal),
+            "Remote monitoring still selects one shared remote group per iteration.");
+    }
+
+    private static void SelectionScopeCarriesOneHostId()
+    {
+        string page = ReadSource("Views", "Pages", "VirtualMachinesPage.xaml.cs");
+        string viewModel = ReadSource("ViewModels", "VirtualMachinesPageViewModel.cs");
+
+        TestAssert.Contains("HostVmGroupViewModel group", page);
+        TestAssert.Contains("vm.UpdateSelection(group.HostId, lv.SelectedItems)", page);
+        TestAssert.Contains("public void UpdateSelection(HostId hostId,", viewModel);
+        TestAssert.Contains("vm.HostId != hostId", viewModel);
+        TestAssert.Contains("targets.Any(vm => vm.HostId != hostId)", viewModel);
     }
 
     private static string ReadSource(params string[] segments) =>

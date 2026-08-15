@@ -62,6 +62,8 @@ public sealed class HostOperationRouter(
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(operation);
+        if (expectedStamp is not null && !CanUseExpectedStamp(hostId, expectedStamp))
+            return new HostVmReadResult<T>(HostVmOperationStatus.Stale, default, "宿主会话已改变，未执行旧会话读取。", null);
         if (!_sessions.TryCaptureManagementOperation(hostId, out HostManagementOperationContext? context, out string reason))
             return new HostVmReadResult<T>(HostVmOperationStatus.Failed, default, reason, null);
         if (expectedStamp is not null && context!.Stamp != expectedStamp)
@@ -114,6 +116,8 @@ public sealed class HostOperationRouter(
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(operation);
+        if (expectedStamp is not null && !CanUseExpectedStamp(hostId, expectedStamp))
+            return new HostVmWriteResult(HostVmOperationStatus.Stale, "宿主会话已改变，未执行旧会话写操作。", null);
         if (!_sessions.TryBeginWrite(hostId, out IHostWriteLease? lease, out string reason))
             return new HostVmWriteResult(HostVmOperationStatus.WriteBlocked, reason, null);
 
@@ -159,4 +163,8 @@ public sealed class HostOperationRouter(
             }
         }
     }
+
+    private bool CanUseExpectedStamp(HostId hostId, HostOperationStamp stamp) =>
+        (hostId.IsLocal ? stamp.ProfileId is null : stamp.ProfileId == hostId.ProfileId)
+        && _sessions.CanApply(stamp);
 }

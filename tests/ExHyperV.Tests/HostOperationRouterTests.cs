@@ -8,7 +8,8 @@ internal static class HostOperationRouterTests
     public static IEnumerable<(string Name, Action Run)> All =>
     [
         ("HostRouter_ReadsUseExplicitLocalOrRemoteHostId", ReadsUseExplicitLocalOrRemoteHostId),
-        ("HostRouter_WritesAndStaleResultsAreScopedToTargetHost", WritesAndStaleResultsAreScopedToTargetHost)
+        ("HostRouter_WritesAndStaleResultsAreScopedToTargetHost", WritesAndStaleResultsAreScopedToTargetHost),
+        ("HostRouter_TwoRemoteHostsKeepWritesAndGenerationsIndependent", TwoRemoteHostsKeepWritesAndGenerationsIndependent)
     ];
 
     private static void ReadsUseExplicitLocalOrRemoteHostId()
@@ -123,6 +124,85 @@ internal static class HostOperationRouterTests
         finally
         {
             releaseRemote.TrySetResult();
+            registry.Shutdown();
+        }
+    }
+
+    private static void TwoRemoteHostsKeepWritesAndGenerationsIndependent()
+    {
+        var registry = new HostSessionRegistry(
+            new RouterConnector(),
+            new RouterSnapshotLoader(),
+            new BlockingReconnectScheduler());
+        IHostOperationRouter router = new HostOperationRouter(registry, new HostWmiContextResolver());
+        var profileA = new HostProfile(
+            Guid.Parse("99999999-9999-9999-9999-999999999991"),
+            "远程 A",
+            "10.0.0.21");
+        var profileB = new HostProfile(
+            Guid.Parse("99999999-9999-9999-9999-999999999992"),
+            "远程 B",
+            "10.0.0.22");
+        HostId hostA = HostId.FromProfile(profileA);
+        HostId hostB = HostId.FromProfile(profileB);
+        var enteredA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        try
+        {
+            TestAssert.True(registry.ConnectAsync(new HostConnectRequest(
+                profileA,
+                HostChannelState.Available,
+                HostChannelState.Available)).GetAwaiter().GetResult().Succeeded, "Remote A did not connect.");
+            TestAssert.True(registry.ConnectAsync(new HostConnectRequest(
+                profileB,
+                HostChannelState.Available,
+                HostChannelState.Available)).GetAwaiter().GetResult().Succeeded, "Remote B did not connect.");
+
+            HostOperationStamp staleA = registry.CaptureOperationStamp(hostA);
+            HostOperationStamp currentB = registry.CaptureOperationStamp(hostB);
+            Task<HostVmWriteResult> writeA = router.WriteAsync(
+                hostA,
+                async (_, token) =>
+                {
+                    enteredA.SetResult();
+                    await releaseA.Task.WaitAsync(token);
+                    return HostVmBackendWriteResult.Success();
+                });
+            TestAssert.True(enteredA.Task.Wait(TimeSpan.FromSeconds(5)), "Remote A write did not start.");
+
+            HostVmWriteResult writeB = router.WriteAsync(
+                hostB,
+                (_, _) => Task.FromResult(HostVmBackendWriteResult.Success())).GetAwaiter().GetResult();
+            HostVmReadResult<string> readB = router.ReadAsync(
+                hostB,
+                (context, _) => Task.FromResult(context.Host)).GetAwaiter().GetResult();
+            TestAssert.True(writeB.Succeeded, writeB.Message);
+            TestAssert.True(readB.Succeeded, readB.Message);
+            TestAssert.Equal(profileB.Address, readB.Value);
+
+            TestAssert.True(registry.ReportConnectionLoss(staleA, "模拟远程 A 断线。"),
+                "Remote A did not accept its current loss report.");
+            releaseA.SetResult();
+            TestAssert.Equal(HostVmOperationStatus.Stale, writeA.GetAwaiter().GetResult().Status);
+            TestAssert.True(registry.CanApply(currentB), "Remote A invalidated remote B's generation.");
+
+            bool staleBackendRan = false;
+            HostVmReadResult<string> staleReadA = router.ReadAsync(
+                hostA,
+                (_, _) =>
+                {
+                    staleBackendRan = true;
+                    return Task.FromResult("unexpected");
+                },
+                staleA).GetAwaiter().GetResult();
+            TestAssert.Equal(HostVmOperationStatus.Stale, staleReadA.Status);
+            TestAssert.False(staleBackendRan, "An old remote A generation reached the backend.");
+            TestAssert.True(registry.CanApply(currentB), "A stale A read changed remote B.");
+        }
+        finally
+        {
+            releaseA.TrySetResult();
             registry.Shutdown();
         }
     }

@@ -40,7 +40,7 @@ namespace ExHyperV.ViewModels
         // ===== 监控与后台任务字段 =====
         private CpuMonitorService _cpuService = null!;
         private CancellationTokenSource? _monitoringCts;
-        private CancellationTokenSource _hostGenerationCts = new();
+        private readonly Dictionary<HostId, Task> _remoteMonitorTasks = [];
         private DispatcherTimer _uiTimer;
         // 防止监控循环对同一网卡重复并发起 IP/ARP 查询（无界堆积）
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _ipLookupsInFlight = new();
@@ -124,9 +124,8 @@ namespace ExHyperV.ViewModels
                 ?? new HostOperationRouter(_sessionRegistry, new HostWmiContextResolver());
             _hostConsoleSessions = new ActiveHostConsoleSessions(_sessionRegistry);
 
-            EnsureHostGroup(HostSessionSnapshot.CreateLocal());
-            HostSessionSnapshot? firstRemote = _sessionRegistry.Current.Hosts.FirstOrDefault(host => !host.HostId.IsLocal);
-            if (firstRemote is not null) EnsureHostGroup(firstRemote);
+            foreach (HostSessionSnapshot session in _sessionRegistry.Current.Hosts)
+                EnsureHostGroup(session);
             ApplySelectedHost(HostGroups[0]);
             ConfigureVmListView();
             _sessionRegistry.Changed += OnHostRegistryChanged;
@@ -170,9 +169,10 @@ namespace ExHyperV.ViewModels
         {
             WeakReferenceMessenger.Default.UnregisterAll(this);
             _sessionRegistry.Changed -= OnHostRegistryChanged;
-            _hostGenerationCts.Cancel();
-            _hostGenerationCts.Dispose();
             _monitoringCts?.Cancel();
+            _monitoringCts?.Dispose();
+            foreach (HostVmGroupViewModel group in HostGroups) group.Dispose();
+            _remoteMonitorTasks.Clear();
             _cpuService?.Dispose();
             _uiTimer?.Stop();
             // 不在此 Dispose 嗅探单例(全进程共用,退出时由其 ProcessExit 钩子清理)
@@ -188,8 +188,6 @@ namespace ExHyperV.ViewModels
                 HostVmGroupViewModel? group = HostGroups.FirstOrDefault(candidate => candidate.HostId == session.HostId);
                 if (group is null)
                 {
-                    // #16 只呈现本机与首台远程宿主；多远程并行刷新由 #17 扩展。
-                    if (!session.HostId.IsLocal && HostGroups.Any(candidate => !candidate.IsLocal)) return;
                     group = EnsureHostGroup(session);
                 }
                 else
@@ -334,6 +332,7 @@ namespace ExHyperV.ViewModels
         private void RebuildVmList(VmKey? preferredSelection = null)
         {
             VmKey? selectedKey = preferredSelection ?? SelectedVm?.VmKey;
+            List<VmInstanceViewModel> previousSelection = _selectedVms.ToList();
             VmList.Clear();
             foreach (HostVmGroupViewModel group in HostGroups.OrderBy(group => group.Order))
             {
@@ -341,8 +340,15 @@ namespace ExHyperV.ViewModels
             }
 
             SelectedVm = selectedKey is VmKey key
-                ? VmList.FirstOrDefault(vm => vm.VmKey == key) ?? VmList.FirstOrDefault()
+                ? VmList.FirstOrDefault(vm => vm.VmKey == key)
+                    ?? previousSelection.LastOrDefault(VmList.Contains)
+                    ?? VmList.FirstOrDefault()
                 : SelectedVm ?? VmList.FirstOrDefault();
+            _selectedVms = previousSelection
+                .Where(vm => VmList.Contains(vm) && vm.HostId == SelectedVm?.HostId)
+                .ToList();
+            if (_selectedVms.Count == 0 && SelectedVm is not null) _selectedVms.Add(SelectedVm);
+            SelectedVmCount = _selectedVms.Count;
         }
 
         private void RemoveVmFromLists(VmInstanceViewModel vm)
@@ -436,9 +442,13 @@ namespace ExHyperV.ViewModels
             ? Properties.Resources.Button_ShutDown
             : Properties.Resources.Button_Start;
 
-        public void UpdateSelection(System.Collections.IList items)
+        public void UpdateSelection(HostId hostId, System.Collections.IList items)
         {
-            _selectedVms = items?.Cast<VmInstanceViewModel>().ToList() ?? new List<VmInstanceViewModel>();
+            List<VmInstanceViewModel> selected = items?.Cast<VmInstanceViewModel>().ToList() ?? [];
+            if (selected.Any(vm => vm.HostId != hostId))
+                throw new ArgumentException("虚拟机选择必须属于同一宿主。", nameof(items));
+
+            _selectedVms = selected;
             if (_selectedVms.Count > 0) SelectedVm = _selectedVms[^1];
             SelectedVmCount = _selectedVms.Count;
         }
@@ -485,7 +495,7 @@ namespace ExHyperV.ViewModels
                         ? HostVmBackendWriteResult.Success()
                         : HostVmBackendWriteResult.Failure(string.Join(Environment.NewLine, failures));
                 },
-                _hostGenerationCts.Token);
+                targets[0].HostGroup.OperationToken);
             foreach (VmInstanceViewModel vm in toAct) vm.ClearTransientState();
             if (!result.Succeeded) ShowError(result.Message);
             await LoadHostGroupAsync(targets[0].HostGroup, showErrors: false);
@@ -758,7 +768,7 @@ namespace ExHyperV.ViewModels
                             ? HostVmBackendWriteResult.Success()
                             : HostVmBackendWriteResult.Failure(response);
                     },
-                    _hostGenerationCts.Token);
+                    instance.HostGroup.OperationToken);
                 if (!operationResult.Succeeded)
                 {
                     Application.Current.Dispatcher.Invoke(() => instance.ClearTransientState());
@@ -844,7 +854,7 @@ namespace ExHyperV.ViewModels
 
             // 重试开机(引擎就地改 .vmcx 即生效,无需停 vmms)
             instance.SetTransientState(GetOptimisticText(action));
-            HostVmWriteResult retry = await ExecuteCurrentHostPowerWriteAsync(instance.HostId, instance.Name, action);
+            HostVmWriteResult retry = await ExecuteCurrentHostPowerWriteAsync(instance, action);
             if (!retry.Succeeded)
             {
                 Application.Current.Dispatcher.Invoke(() => instance.ClearTransientState());
@@ -898,7 +908,7 @@ namespace ExHyperV.ViewModels
             ShowSuccess(string.Format(Properties.Resources.Storage_StaleDiskRemoved, removed));
 
             instance.SetTransientState(GetOptimisticText(action));
-            HostVmWriteResult retry = await ExecuteCurrentHostPowerWriteAsync(instance.HostId, instance.Name, action);
+            HostVmWriteResult retry = await ExecuteCurrentHostPowerWriteAsync(instance, action);
             if (!retry.Succeeded)
             {
                 Application.Current.Dispatcher.Invoke(() => instance.ClearTransientState());
@@ -912,17 +922,17 @@ namespace ExHyperV.ViewModels
             return true;
         }
 
-        private Task<HostVmWriteResult> ExecuteCurrentHostPowerWriteAsync(HostId hostId, string vmName, string action) =>
+        private Task<HostVmWriteResult> ExecuteCurrentHostPowerWriteAsync(VmInstanceViewModel instance, string action) =>
             _hostOperationRouter.WriteAsync(
-                hostId,
+                instance.HostId,
                 async (context, token) =>
                 {
-                    ApiResponse response = await VmPowerService.ExecuteControlActionAsync(vmName, action, context, token);
+                    ApiResponse response = await VmPowerService.ExecuteControlActionAsync(instance.Name, action, context, token);
                     return response.Success
                         ? HostVmBackendWriteResult.Success()
                         : HostVmBackendWriteResult.Failure(response);
                 },
-                cancellationToken: _hostGenerationCts.Token);
+                cancellationToken: instance.HostGroup.OperationToken);
 
         private static string DescribeStalePassthroughDisk(VmStorageItem d)
             => !string.IsNullOrEmpty(d.DiskModel) ? d.DiskModel
@@ -939,8 +949,8 @@ namespace ExHyperV.ViewModels
             IsLoading = true;
             try
             {
-                foreach (HostVmGroupViewModel group in HostGroups.OrderBy(group => group.Order).ToArray())
-                    await LoadHostGroupAsync(group, showErrors: true);
+                HostVmGroupViewModel[] groups = HostGroups.OrderBy(group => group.Order).ToArray();
+                await Task.WhenAll(groups.Select(group => LoadHostGroupAsync(group, showErrors: true)));
                 StartMonitoring();
             }
             finally
@@ -956,17 +966,16 @@ namespace ExHyperV.ViewModels
 
             group.IsLoading = true;
             group.LoadError = string.Empty;
-            CancellationTokenSource loadGeneration = _hostGenerationCts;
+            CancellationToken loadToken = group.OperationToken;
             try
             {
                 HostVmReadResult<List<VmInstance>> read = await _hostOperationRouter.ReadAsync(
                     group.HostId,
                     (context, token) => _queryService.GetVmListAsync(context, token),
-                    loadGeneration.Token);
+                    loadToken);
                 if (read.Status is HostVmOperationStatus.Cancelled or HostVmOperationStatus.Stale) return;
                 if (!read.Succeeded) throw new InvalidOperationException(read.Message);
-                if (loadGeneration.IsCancellationRequested
-                    || !ReferenceEquals(loadGeneration, _hostGenerationCts)
+                if (loadToken.IsCancellationRequested
                     || read.Operation is null
                     || !_sessionRegistry.CanApply(read.Operation.Stamp)) return;
 
@@ -980,7 +989,7 @@ namespace ExHyperV.ViewModels
             }
             finally
             {
-                if (ReferenceEquals(loadGeneration, _hostGenerationCts)) group.IsLoading = false;
+                group.IsLoading = false;
             }
         }
 
@@ -1078,27 +1087,39 @@ namespace ExHyperV.ViewModels
         // 启动后台监控线程
         private void StartMonitoring()
         {
-            if (_monitoringCts != null) return;
-            _monitoringCts = new CancellationTokenSource();
-            CancellationToken token = _monitoringCts.Token;
-            HostVmGroupViewModel localGroup = HostGroups.First(group => group.IsLocal);
-            _ = Task.Run(() => MonitorCpuLoop(token));
-            _ = Task.Run(() => MonitorStateLoop(localGroup, token));
-            _ = Task.Run(() => MonitorRemoteStateLoop(token));
-            _ = Task.Run(() => MonitorThumbnailLoop(token));
+            if (_monitoringCts is null)
+            {
+                _monitoringCts = new CancellationTokenSource();
+                CancellationToken token = _monitoringCts.Token;
+                HostVmGroupViewModel localGroup = HostGroups.First(group => group.IsLocal);
+                _ = Task.Run(() => MonitorCpuLoop(token));
+                _ = Task.Run(() => MonitorStateLoop(localGroup, token));
+                _ = Task.Run(() => MonitorThumbnailLoop(token));
+            }
+
+            foreach (HostVmGroupViewModel group in HostGroups.Where(group => !group.IsLocal))
+                StartRemoteMonitoring(group);
         }
 
-        private async Task MonitorRemoteStateLoop(CancellationToken token)
+        private void StartRemoteMonitoring(HostVmGroupViewModel group)
+        {
+            if (group.IsLocal || _remoteMonitorTasks.ContainsKey(group.HostId)) return;
+            _remoteMonitorTasks.Add(
+                group.HostId,
+                Task.Run(() => MonitorRemoteStateLoop(group, group.OperationToken)));
+        }
+
+        private async Task MonitorRemoteStateLoop(HostVmGroupViewModel group, CancellationToken token)
         {
             while (!token.IsCancellationRequested)
             {
                 try
                 {
-                    HostVmGroupViewModel? group = null;
+                    bool canRead = false;
                     Application.Current.Dispatcher.Invoke(() =>
-                        group = HostGroups.FirstOrDefault(candidate => !candidate.IsLocal));
-                    if (group is null
-                        || !group.Capabilities[HostCapabilityKind.VmRead].CanExecute)
+                        canRead = HostGroups.Contains(group)
+                            && group.Capabilities[HostCapabilityKind.VmRead].CanExecute);
+                    if (!canRead)
                     {
                         await Task.Delay(2000, token);
                         continue;
@@ -1117,7 +1138,9 @@ namespace ExHyperV.ViewModels
                     if (!read.Succeeded) throw new InvalidOperationException(read.Message);
                     Application.Current.Dispatcher.Invoke(() =>
                     {
-                        if (read.Operation is null || !_sessionRegistry.CanApply(read.Operation.Stamp)) return;
+                        if (!HostGroups.Contains(group)
+                            || read.Operation is null
+                            || !_sessionRegistry.CanApply(read.Operation.Stamp)) return;
                         ApplyHostVmUpdates(group, read.Value ?? []);
                     });
                     await Task.Delay(2000, token);
@@ -1316,7 +1339,7 @@ namespace ExHyperV.ViewModels
                 HostVmReadResult<List<VmInstance>> read = await _hostOperationRouter.ReadAsync(
                     vm.HostId,
                     (context, token) => _queryService.GetVmListAsync(context, token),
-                    _hostGenerationCts.Token);
+                    vm.HostGroup.OperationToken);
                 var freshData = read.Succeeded ? read.Value?.FirstOrDefault(x => x.Name == vm.Name) : null;
                 if (freshData != null)
                 {
