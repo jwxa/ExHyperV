@@ -33,7 +33,8 @@ namespace ExHyperV.Views
 
         private readonly ConsoleViewModel _vm;
         private readonly ActiveHostConsoleSession _session;
-        private readonly IActiveHostSessionCoordinator _hostCoordinator;
+        private readonly HostId _hostId;
+        private readonly IHostSessionRegistry _sessionRegistry;
         private bool _isFullScreen;               // 供 WM_GETMINMAXINFO 判断最大化铺满显示器还是工作区
         private bool _syncingFs;                  // 防止 mstscax→VM→mstscax 全屏状态回灌
         private bool _weInitiatedDisconnect;      // 标记我方主动断开(模式切换/VM 停止)，以免被当作"非预期断开"
@@ -53,11 +54,14 @@ namespace ExHyperV.Views
         public ConsoleWindow(ActiveHostConsoleSession session)
         {
             _session = session ?? throw new ArgumentNullException(nameof(session));
-            _hostCoordinator = ActiveHostSessions.Current;
-            if (!_hostCoordinator.CanUseConsole(session.Stamp))
+            _hostId = session.Stamp.ProfileId is Guid profileId
+                ? HostId.FromProfileId(profileId)
+                : HostId.Local;
+            _sessionRegistry = ActiveHostSessions.Registry;
+            if (!_sessionRegistry.CanUseConsole(session.Stamp))
                 throw new InvalidOperationException("活动宿主已改变，未打开旧宿主控制台。");
 
-            _vm = new ConsoleViewModel(session, _hostCoordinator);
+            _vm = new ConsoleViewModel(session, _sessionRegistry);
             this.DataContext = _vm;
             InitializeComponent();
             if (App.PerformanceMode)
@@ -66,10 +70,10 @@ namespace ExHyperV.Views
                 SetResourceReference(BackgroundProperty, "ApplicationBackgroundBrush");
             }
             this.Title = $"{session.VmName} - {session.Target.DisplayName}";
-            _hostCoordinator.StateChanged += OnActiveHostStateChanged;
-            if (!_hostCoordinator.CanUseConsole(session.Stamp))
+            _sessionRegistry.Changed += OnHostRegistryChanged;
+            if (!_sessionRegistry.CanUseConsole(session.Stamp))
             {
-                _hostCoordinator.StateChanged -= OnActiveHostStateChanged;
+                _sessionRegistry.Changed -= OnHostRegistryChanged;
                 _vm.Dispose();
                 _rdpTornDown = true;
                 RdpHost.ShutdownAndDispose();
@@ -206,12 +210,9 @@ namespace ExHyperV.Views
         // 经 Dispatcher 兜底确保在 UI 线程执行（SyncConnection 会碰 RdpHost）。
         private void OnVmPolled() => Dispatcher.BeginInvoke(new Action(() => SyncConnection(forceReconnect: false)));
 
-        private void OnActiveHostStateChanged(object? sender, ActiveHostStateChangedEventArgs e)
+        private void OnHostRegistryChanged(object? sender, HostRegistryChangedEventArgs e)
         {
-            if (e.Current.ActiveSession.ConsoleChannel == HostChannelState.Available
-                && !e.Current.ActiveSession.HasStaleData
-                && _hostCoordinator.CanUseConsole(_session.Stamp))
-                return;
+            if (e.ChangedHostId != _hostId || _sessionRegistry.CanUseConsole(_session.Stamp)) return;
 
             Dispatcher.BeginInvoke(new Action(() =>
             {
@@ -261,7 +262,7 @@ namespace ExHyperV.Views
         private void SyncConnection(bool forceReconnect)
         {
             if (_closing) return;   // 正在关闭：不再重连（避免连接栏关闭后被轮询重连"复活"）
-            if (!_hostCoordinator.CanUseConsole(_session.Stamp))
+            if (!_sessionRegistry.CanUseConsole(_session.Stamp))
             {
                 if (RdpHost.ConnectionState != 0)
                 {
@@ -625,7 +626,7 @@ namespace ExHyperV.Views
             _vm.SendCadRequested -= OnSendCadRequested;
             _vm.PropertyChanged -= OnViewModelPropertyChanged;
             _vm.Polled -= OnVmPolled;
-            _hostCoordinator.StateChanged -= OnActiveHostStateChanged;
+            _sessionRegistry.Changed -= OnHostRegistryChanged;
             _vm.Dispose();
 
             // 延到 idle 再摘钩：兜住关闭 Invoke 排在 OnClosed 之后才跑的时序，之后解绑不泄漏本窗口。

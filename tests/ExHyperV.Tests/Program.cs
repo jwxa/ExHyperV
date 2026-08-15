@@ -32,6 +32,8 @@ var tests = new List<(string Name, Action Run)>
 };
 tests.AddRange(DiagnosticsTests.All);
 tests.AddRange(HostSessionRegistryTests.All);
+tests.AddRange(HostOperationRouterTests.All);
+tests.AddRange(VirtualMachinesMultiHostWiringTests.All);
 tests.AddRange(SessionSwitchTests.All);
 tests.AddRange(VmOperationTests.All);
 tests.AddRange(ConsoleSessionTests.All);

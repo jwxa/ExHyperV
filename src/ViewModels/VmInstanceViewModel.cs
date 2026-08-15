@@ -5,6 +5,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using ExHyperV.Models;
 using ExHyperV.Services;
+using ExHyperV.Services.Remote.Sessions;
 using ExHyperV.Tools;
 
 namespace ExHyperV.ViewModels
@@ -27,6 +28,10 @@ namespace ExHyperV.ViewModels
         // ===== Model 引用（构造时绑定，永不替换；Service 通过它访问底层数据） =====
 
         public VmInstance Model { get; }
+        public HostId HostId { get; }
+        public VmKey VmKey { get; }
+        public bool IsRemoteHost => !HostId.IsLocal;
+        public HostVmGroupViewModel HostGroup { get; internal set; } = null!;
 
 
         // ===== 编辑名称（view-only） =====
@@ -243,9 +248,11 @@ namespace ExHyperV.ViewModels
 
         // ===== 构造：从 Model 初始化 VM（Model 引用保留，集合通过 pass-through 共享） =====
 
-        public VmInstanceViewModel(VmInstance model)
+        public VmInstanceViewModel(HostId hostId, VmInstance model)
         {
             Model = model ?? throw new ArgumentNullException(nameof(model));
+            HostId = hostId;
+            VmKey = new VmKey(hostId, model.Id);
 
             // ── 标量字段：从 Model 拷入 VM 的 [ObservableProperty] backing field
             //    （直接赋字段、不走 setter，避免构造期触发 OnXxxChanged 反写 Model 同一个值）

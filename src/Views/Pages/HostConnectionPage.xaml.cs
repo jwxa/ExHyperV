@@ -45,7 +45,7 @@ public partial class HostConnectionPage
             diagnosticPipeline);
         return new HostConnectionPageViewModel(
             new HostProfileManager(new HostProfileStore(), credentialStore),
-            ActiveHostSessions.Current,
+            ActiveHostSessions.Registry,
             diagnosticPipeline,
             preflightPipeline,
             configurationPipeline,

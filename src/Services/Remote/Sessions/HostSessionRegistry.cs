@@ -3,6 +3,7 @@ namespace ExHyperV.Services.Remote.Sessions;
 public sealed class HostSessionRegistry : IHostSessionRegistry
 {
     private readonly object _sync = new();
+    private readonly ActiveHostSessionCoordinator _localCoordinator = new();
     private readonly Func<ActiveHostSessionCoordinator> _coordinatorFactory;
     private readonly Dictionary<HostId, ActiveHostSessionCoordinator> _remoteCoordinators = [];
     private readonly List<HostId> _remoteOrder = [];
@@ -105,16 +106,93 @@ public sealed class HostSessionRegistry : IHostSessionRegistry
         lock (_sync)
         {
             if (_isShutdown) throw new InvalidOperationException("应用正在关闭，不能捕获宿主操作代次。");
-            if (hostId.IsLocal)
-            {
-                HostSessionSnapshot local = _current.Hosts[0];
-                return new HostOperationStamp(local.Generation, null);
-            }
+            if (hostId.IsLocal) return _localCoordinator.CaptureOperationStamp();
             if (!_remoteCoordinators.TryGetValue(hostId, out ActiveHostSessionCoordinator? coordinator))
                 throw new KeyNotFoundException("指定宿主不在会话注册表中。");
 
             return coordinator.CaptureOperationStamp();
         }
+    }
+
+    public bool TryBeginWrite(
+        HostId hostId,
+        out IHostWriteLease? lease,
+        out string reason)
+    {
+        ActiveHostSessionCoordinator? coordinator;
+        lock (_sync)
+        {
+            if (_isShutdown)
+            {
+                lease = null;
+                reason = "应用正在关闭，不能开始宿主写操作。";
+                return false;
+            }
+            if (hostId.IsLocal)
+                return _localCoordinator.TryBeginWrite(out lease, out reason);
+            if (!_remoteCoordinators.TryGetValue(hostId, out coordinator))
+            {
+                lease = null;
+                reason = "指定宿主未连接。";
+                return false;
+            }
+        }
+
+        return coordinator.TryBeginWrite(out lease, out reason);
+    }
+
+    public bool TryCaptureManagementOperation(
+        HostId hostId,
+        out HostManagementOperationContext? context,
+        out string reason)
+    {
+        ActiveHostSessionCoordinator? coordinator;
+        lock (_sync)
+        {
+            if (_isShutdown)
+            {
+                context = null;
+                reason = "应用正在关闭，不能开始宿主操作。";
+                return false;
+            }
+            if (hostId.IsLocal)
+                return _localCoordinator.TryCaptureManagementOperation(out context, out reason);
+            if (!_remoteCoordinators.TryGetValue(hostId, out coordinator))
+            {
+                context = null;
+                reason = "指定宿主未连接。";
+                return false;
+            }
+        }
+
+        return coordinator.TryCaptureManagementOperation(out context, out reason);
+    }
+
+    public bool TryCaptureConsoleOperation(
+        HostId hostId,
+        out HostConsoleOperationContext? context,
+        out string reason)
+    {
+        ActiveHostSessionCoordinator? coordinator;
+        lock (_sync)
+        {
+            if (_isShutdown)
+            {
+                context = null;
+                reason = "应用正在关闭，不能打开虚拟机控制台。";
+                return false;
+            }
+            if (hostId.IsLocal)
+                return _localCoordinator.TryCaptureConsoleOperation(out context, out reason);
+            if (!_remoteCoordinators.TryGetValue(hostId, out coordinator))
+            {
+                context = null;
+                reason = "指定宿主未连接。";
+                return false;
+            }
+        }
+
+        return coordinator.TryCaptureConsoleOperation(out context, out reason);
     }
 
     public bool CanApply(HostOperationStamp stamp)
@@ -124,13 +202,27 @@ public sealed class HostSessionRegistry : IHostSessionRegistry
         lock (_sync)
         {
             if (_isShutdown) return false;
-            if (stamp.ProfileId is null)
-                return stamp.Generation == _current.Hosts[0].Generation;
+            if (stamp.ProfileId is null) return _localCoordinator.CanApply(stamp);
             if (!_remoteCoordinators.TryGetValue(HostId.FromProfileId(stamp.ProfileId.Value), out coordinator))
                 return false;
         }
 
         return coordinator.CanApply(stamp);
+    }
+
+    public bool CanUseConsole(HostOperationStamp stamp)
+    {
+        ArgumentNullException.ThrowIfNull(stamp);
+        ActiveHostSessionCoordinator? coordinator;
+        lock (_sync)
+        {
+            if (_isShutdown) return false;
+            if (stamp.ProfileId is null) return _localCoordinator.CanUseConsole(stamp);
+            if (!_remoteCoordinators.TryGetValue(HostId.FromProfileId(stamp.ProfileId.Value), out coordinator))
+                return false;
+        }
+
+        return coordinator.CanUseConsole(stamp);
     }
 
     public bool ReportConnectionLoss(HostOperationStamp stamp, string reason)
@@ -149,6 +241,55 @@ public sealed class HostSessionRegistry : IHostSessionRegistry
         return coordinator.ReportConnectionLoss(stamp, reason);
     }
 
+    public bool RetryReconnectNow(HostId hostId)
+    {
+        ActiveHostSessionCoordinator? coordinator;
+        lock (_sync)
+        {
+            if (_isShutdown
+                || hostId.IsLocal
+                || !_remoteCoordinators.TryGetValue(hostId, out coordinator))
+                return false;
+        }
+
+        return coordinator.RetryReconnectNow();
+    }
+
+    public void StopReconnect(HostId hostId)
+    {
+        ActiveHostSessionCoordinator? coordinator;
+        lock (_sync)
+        {
+            if (_isShutdown
+                || hostId.IsLocal
+                || !_remoteCoordinators.TryGetValue(hostId, out coordinator))
+                return;
+        }
+
+        coordinator.StopReconnect();
+    }
+
+    public bool UpdateHostChannels(
+        HostId hostId,
+        HostChannelState managementChannel,
+        HostChannelState consoleChannel,
+        string? managementFailureReason = null)
+    {
+        if (hostId.IsLocal) return false;
+        ActiveHostSessionCoordinator? coordinator;
+        lock (_sync)
+        {
+            if (_isShutdown || !_remoteCoordinators.TryGetValue(hostId, out coordinator))
+                return false;
+        }
+
+        return coordinator.UpdateActiveChannels(
+            hostId.ProfileId,
+            managementChannel,
+            consoleChannel,
+            managementFailureReason);
+    }
+
     public void Shutdown()
     {
         ActiveHostSessionCoordinator[] coordinators;
@@ -161,6 +302,7 @@ public sealed class HostSessionRegistry : IHostSessionRegistry
 
         foreach (ActiveHostSessionCoordinator coordinator in coordinators)
             coordinator.Shutdown();
+        _localCoordinator.Shutdown();
     }
 
     private HostRegistrySnapshot BuildSnapshotLocked()

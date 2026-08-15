@@ -1,11 +1,16 @@
-﻿using System.Windows.Controls;
+using System.Windows.Controls;
 using ExHyperV.ViewModels;
 using ExHyperV.Services;
+using System.Windows;
+using System.Windows.Media;
+using System.Windows.Input;
 
 namespace ExHyperV.Views
 {
     public partial class VirtualMachinesPage : Page
     {
+        private bool _isSynchronizingVmSelection;
+
         public VirtualMachinesPage()
         {
             InitializeComponent();
@@ -27,8 +32,46 @@ namespace ExHyperV.Views
         // ListView 多选（Ctrl/Shift）无法直接绑定 SelectedItems，经此把选中集推给 VM：>1 时右键菜单收敛为删除/彻底删除。
         private void VmList_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (sender is System.Windows.Controls.ListView lv && DataContext is VirtualMachinesPageViewModel vm)
+            if (_isSynchronizingVmSelection
+                || e.AddedItems.Count == 0
+                || sender is not System.Windows.Controls.ListView lv
+                || DataContext is not VirtualMachinesPageViewModel vm)
+                return;
+
+            _isSynchronizingVmSelection = true;
+            try
+            {
+                foreach (System.Windows.Controls.ListView other in FindVisualChildren<System.Windows.Controls.ListView>(HostGroupsList))
+                {
+                    if (!ReferenceEquals(other, lv)) other.UnselectAll();
+                }
                 vm.UpdateSelection(lv.SelectedItems);
+            }
+            finally
+            {
+                _isSynchronizingVmSelection = false;
+            }
+        }
+
+        private void VmList_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            if (sender is not System.Windows.Controls.ListView list
+                || e.OriginalSource is not DependencyObject source)
+                return;
+
+            if (ItemsControl.ContainerFromElement(list, source) is System.Windows.Controls.ListViewItem item)
+                item.IsSelected = true;
+        }
+
+        private static IEnumerable<T> FindVisualChildren<T>(DependencyObject root)
+            where T : DependencyObject
+        {
+            for (int index = 0; index < VisualTreeHelper.GetChildrenCount(root); index++)
+            {
+                DependencyObject child = VisualTreeHelper.GetChild(root, index);
+                if (child is T match) yield return match;
+                foreach (T descendant in FindVisualChildren<T>(child)) yield return descendant;
+            }
         }
     }
 }

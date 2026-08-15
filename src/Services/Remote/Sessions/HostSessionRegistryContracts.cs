@@ -4,7 +4,7 @@ using ExHyperV.Services.Remote.Profiles;
 
 namespace ExHyperV.Services.Remote.Sessions;
 
-public interface IHostSessionRegistry
+public interface IHostSessionRegistry : IHostOperationSessionSource
 {
     HostRegistrySnapshot Current { get; }
     event EventHandler<HostRegistryChangedEventArgs>? Changed;
@@ -14,9 +14,35 @@ public interface IHostSessionRegistry
         CancellationToken cancellationToken = default);
 
     HostOperationStamp CaptureOperationStamp(HostId hostId);
+    bool TryCaptureConsoleOperation(
+        HostId hostId,
+        out HostConsoleOperationContext? context,
+        out string reason);
+    bool CanUseConsole(HostOperationStamp stamp);
+    bool RetryReconnectNow(HostId hostId);
+    void StopReconnect(HostId hostId);
+    bool UpdateHostChannels(
+        HostId hostId,
+        HostChannelState managementChannel,
+        HostChannelState consoleChannel,
+        string? managementFailureReason = null);
+    void Shutdown();
+}
+
+public interface IHostOperationSessionSource
+{
+    bool TryBeginWrite(
+        HostId hostId,
+        out IHostWriteLease? lease,
+        out string reason);
+
+    bool TryCaptureManagementOperation(
+        HostId hostId,
+        out HostManagementOperationContext? context,
+        out string reason);
+
     bool CanApply(HostOperationStamp stamp);
     bool ReportConnectionLoss(HostOperationStamp stamp, string reason);
-    void Shutdown();
 }
 
 public sealed class HostRegistryChangedEventArgs(
@@ -36,6 +62,16 @@ public sealed record HostConnectRequest(
     WindowsCredential? TransientCredential = null,
     bool RevalidateChannels = false)
 {
+    public static HostConnectRequest ForConfirmedDiagnostic(
+        HostProfile profile,
+        bool consoleAvailable,
+        WindowsCredential? transientCredential = null) => new(
+            profile ?? throw new ArgumentNullException(nameof(profile)),
+            HostChannelState.Available,
+            consoleAvailable ? HostChannelState.Available : HostChannelState.Unavailable,
+            transientCredential,
+            RevalidateChannels: true);
+
     internal HostSwitchRequest ToSwitchRequest() => new(
         Profile,
         ManagementChannel,
@@ -71,6 +107,11 @@ public sealed record HostSessionSnapshot(
     HostChannelState ConsoleChannel,
     bool HasStaleData)
 {
+    public HostBasicSnapshot? BasicSnapshot { get; init; }
+    public HostReconnectState Reconnect { get; init; } = HostReconnectState.None;
+    public HostCapabilityMatrix Capabilities { get; init; } =
+        HostCapabilityMatrix.Create(ActiveHostSession.CreateLocal(), isSwitching: false);
+
     public static HostSessionSnapshot CreateLocal() => new(
         HostId.Local,
         1,
@@ -91,7 +132,12 @@ public sealed record HostSessionSnapshot(
             session.ConnectionState,
             session.ManagementChannel,
             session.ConsoleChannel,
-            session.HasStaleData);
+            session.HasStaleData)
+        {
+            BasicSnapshot = snapshot.BasicSnapshot,
+            Reconnect = snapshot.Reconnect,
+            Capabilities = snapshot.Capabilities
+        };
     }
 }
 
@@ -114,4 +160,10 @@ public sealed class HostRegistrySnapshot
     }
 
     public IReadOnlyList<HostSessionSnapshot> Hosts => _hosts;
+
+    public bool TryGet(HostId hostId, out HostSessionSnapshot? session)
+    {
+        session = _hosts.FirstOrDefault(candidate => candidate.HostId == hostId);
+        return session is not null;
+    }
 }

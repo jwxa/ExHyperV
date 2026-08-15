@@ -16,8 +16,9 @@ namespace ExHyperV.ViewModels
 
         private readonly VmQueryService _queryService = new();
         private readonly ActiveHostConsoleSession _session;
-        private readonly IActiveHostSessionCoordinator _hostCoordinator;
-        private readonly ActiveHostVmOperations _hostVmOperations;
+        private readonly HostId _hostId;
+        private readonly IHostSessionRegistry _sessionRegistry;
+        private readonly IHostOperationRouter _hostOperationRouter;
         private readonly CancellationTokenSource _lifetimeCts = new();
         private readonly CancellationToken _lifetimeToken;
         private DispatcherTimer _statusTimer = null!;
@@ -63,16 +64,19 @@ namespace ExHyperV.ViewModels
 
         public ConsoleViewModel(
             ActiveHostConsoleSession session,
-            IActiveHostSessionCoordinator hostCoordinator)
+            IHostSessionRegistry sessionRegistry)
         {
             _session = session ?? throw new ArgumentNullException(nameof(session));
-            _hostCoordinator = hostCoordinator ?? throw new ArgumentNullException(nameof(hostCoordinator));
-            _hostVmOperations = new ActiveHostVmOperations(_hostCoordinator, new HostWmiContextResolver());
+            _sessionRegistry = sessionRegistry ?? throw new ArgumentNullException(nameof(sessionRegistry));
+            _hostId = session.Stamp.ProfileId is Guid profileId
+                ? HostId.FromProfileId(profileId)
+                : HostId.Local;
+            _hostOperationRouter = new HostOperationRouter(_sessionRegistry, new HostWmiContextResolver());
             _lifetimeToken = _lifetimeCts.Token;
             VmId = session.VmId.ToString("D");
             VmName = session.VmName;
-            _hostCoordinator.StateChanged += OnActiveHostStateChanged;
-            UpdateCapturedHostCapabilities(_hostCoordinator.Current);
+            _sessionRegistry.Changed += OnHostRegistryChanged;
+            UpdateCapturedHostCapabilities(_sessionRegistry.Current);
             // 打开控制台时优先用配置里保存的缩放档（语言中立："auto"→当前语言的适应窗口，百分比直用）；无/无效则保持默认 100%。
             var savedZoom = SettingsService.GetDefaultZoom();
             if (savedZoom == ZoomAutoToken) SelectedZoom = Properties.Resources.ConsoleWindow_ZoomAuto;
@@ -109,9 +113,10 @@ namespace ExHyperV.ViewModels
             _polling = true;
             try
             {
-                if (!_hostCoordinator.CanUseConsole(_session.Stamp)) return;
+                if (!_sessionRegistry.CanUseConsole(_session.Stamp)) return;
                 HostVmReadResult<(Models.VmInstance? Vm, bool EnhancedAvailable)> read =
-                    await _hostVmOperations.ReadAsync(
+                    await _hostOperationRouter.ReadAsync(
+                        _hostId,
                         async (context, cancellationToken) =>
                         {
                             var vms = await _queryService.GetVmListAsync(context, cancellationToken);
@@ -122,8 +127,8 @@ namespace ExHyperV.ViewModels
                                 && await VmConsoleService.IsEnhancedSessionAvailableAsync(current.Name, context);
                             return (current, enhancedAvailable);
                         },
-                        _lifetimeToken,
-                        _session.Stamp);
+                        _session.Stamp,
+                        _lifetimeToken);
                 if (!read.Succeeded) return;
 
                 var currentVm = read.Value.Vm;
@@ -167,9 +172,10 @@ namespace ExHyperV.ViewModels
 
             try
             {
-                if (!_hostCoordinator.CanUseConsole(_session.Stamp)) return;
+                if (!_sessionRegistry.CanUseConsole(_session.Stamp)) return;
 
-                HostVmReadResult<Models.VmInstance?> read = await _hostVmOperations.ReadAsync(
+                HostVmReadResult<Models.VmInstance?> read = await _hostOperationRouter.ReadAsync(
+                    _hostId,
                     async (context, cancellationToken) =>
                     {
                         var vms = await _queryService.GetVmListAsync(context, cancellationToken);
@@ -177,14 +183,14 @@ namespace ExHyperV.ViewModels
                             v.Id == _session.VmId
                             || v.Name.Equals(VmName, StringComparison.OrdinalIgnoreCase));
                     },
-                    _lifetimeToken,
-                    _session.Stamp);
+                    _session.Stamp,
+                    _lifetimeToken);
 
                 // 虚拟机已关机或删除属于单个控制台的正常结束，不把整个宿主标记为断线。
                 if (read.Succeeded && (read.Value is null || !read.Value.IsRunning)) return;
-                if (!_hostCoordinator.CanApply(_session.Stamp)) return;
+                if (!_sessionRegistry.CanApply(_session.Stamp)) return;
 
-                _hostCoordinator.ReportConnectionLoss(_session.Stamp, reason);
+                _sessionRegistry.ReportConnectionLoss(_session.Stamp, reason);
             }
             catch (OperationCanceledException) when (_lifetimeToken.IsCancellationRequested)
             {
@@ -229,7 +235,8 @@ namespace ExHyperV.ViewModels
             try
             {
                 IsBusy = true;
-                HostVmWriteResult result = await _hostVmOperations.WriteAsync(
+                HostVmWriteResult result = await _hostOperationRouter.WriteAsync(
+                    _hostId,
                     async (context, cancellationToken) =>
                     {
                         var response = await VmPowerService.ExecuteControlActionAsync(
@@ -393,24 +400,26 @@ namespace ExHyperV.ViewModels
         public void Dispose()
         {
             _statusTimer?.Stop();
-            _hostCoordinator.StateChanged -= OnActiveHostStateChanged;
+            _sessionRegistry.Changed -= OnHostRegistryChanged;
             _lifetimeCts.Cancel();
             _lifetimeCts.Dispose();
         }
 
-        private void OnActiveHostStateChanged(object? sender, ActiveHostStateChangedEventArgs e)
+        private void OnHostRegistryChanged(object? sender, HostRegistryChangedEventArgs e)
         {
+            if (e.ChangedHostId != _hostId) return;
             void Update() => UpdateCapturedHostCapabilities(e.Current);
             var dispatcher = System.Windows.Application.Current?.Dispatcher;
             if (dispatcher is null || dispatcher.CheckAccess()) Update();
             else dispatcher.Invoke(Update);
         }
 
-        private void UpdateCapturedHostCapabilities(ActiveHostCoordinatorSnapshot snapshot)
+        private void UpdateCapturedHostCapabilities(HostRegistrySnapshot snapshot)
         {
-            CanWriteToCapturedHost = snapshot.Capabilities[HostCapabilityKind.VmWrite].CanExecute
-                && snapshot.ActiveSession.Generation == _session.Stamp.Generation
-                && snapshot.ActiveSession.Target.ProfileId == _session.Stamp.ProfileId;
+            CanWriteToCapturedHost = snapshot.TryGet(_hostId, out HostSessionSnapshot? host)
+                && host is not null
+                && host.Capabilities[HostCapabilityKind.VmWrite].CanExecute
+                && host.Generation == _session.Stamp.Generation;
         }
     }
 }

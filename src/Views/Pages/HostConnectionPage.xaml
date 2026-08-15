@@ -136,9 +136,6 @@
                            Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}" Margin="0,3,0,0"/>
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                <ui:Button Command="{Binding SwitchToLocalCommand}" Appearance="Secondary" Margin="0,0,8,0"
-                           Visibility="{Binding CanSwitchToLocal, Converter={StaticResource BoolToVis}}"
-                           Content="切回本机" Icon="Desktop24"/>
                 <ui:Button Command="{Binding OpenLogsCommand}" Appearance="Secondary" Margin="0,0,8,0"
                            ToolTip="打开 ExHyperV 日志目录"
                            Content="日志" Icon="DocumentBulletList24"/>
@@ -296,7 +293,7 @@
                                                Visibility="{Binding IsSwitching, Converter={StaticResource BoolToVis}, ConverterParameter=Invert}"/>
                                 <TextBlock Text="连接到此主机"
                                            Visibility="{Binding IsSwitching, Converter={StaticResource BoolToVis}, ConverterParameter=Invert}"/>
-                                <TextBlock Text="正在切换"
+                                <TextBlock Text="正在连接"
                                            Visibility="{Binding IsSwitching, Converter={StaticResource BoolToVis}}"/>
                             </StackPanel>
                         </ui:Button>

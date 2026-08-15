@@ -277,7 +277,7 @@ internal static class CapabilityTests
             System.Text.RegularExpressions.RegexOptions.CultureInvariant
             | System.Text.RegularExpressions.RegexOptions.Singleline);
 
-        TestAssert.Equal(2, buttons.Count);
+        TestAssert.Equal(1, buttons.Count);
         foreach (System.Text.RegularExpressions.Match button in buttons)
         {
             TestAssert.Contains("IsConsoleAvailable", button.Value);
@@ -290,17 +290,22 @@ internal static class CapabilityTests
     {
         string source = File.ReadAllText(Path.Combine(
             FindRepositoryRoot(), "src", "ViewModels", "VirtualMachinesPageViewModel.cs"));
-        int mapping = source.IndexOf("var finalCollection = await Task.Run", StringComparison.Ordinal);
-        TestAssert.True(mapping >= 0, "Could not locate the asynchronous VM list mapping step.");
-        int assignment = source.IndexOf("VmList = finalCollection", mapping, StringComparison.Ordinal);
-        TestAssert.True(assignment > mapping, "Could not locate the mapped VM list assignment.");
-        int recheck = source.LastIndexOf(
-            "!ReferenceEquals(loadGeneration, _hostGenerationCts)",
-            assignment,
+        int loadMethod = source.IndexOf("private async Task LoadHostGroupAsync", StringComparison.Ordinal);
+        TestAssert.True(loadMethod >= 0, "Could not locate per-host VM loading.");
+        int staleGate = source.IndexOf(
+            "HostVmOperationStatus.Cancelled or HostVmOperationStatus.Stale",
+            loadMethod,
             StringComparison.Ordinal);
+        int recheck = source.IndexOf(
+            "_sessionRegistry.CanApply(read.Operation.Stamp)",
+            loadMethod,
+            StringComparison.Ordinal);
+        int assignment = source.IndexOf("ApplyHostVmUpdates(group", loadMethod, StringComparison.Ordinal);
+        TestAssert.True(staleGate > loadMethod && staleGate < assignment,
+            "Per-host VM loading can apply a stale router result.");
         TestAssert.True(
-            recheck > mapping && recheck < assignment,
-            "Mapped VM results can be assigned without rechecking the active host generation.");
+            recheck > staleGate && recheck < assignment,
+            "Per-host VM results can be applied without rechecking the owning host generation.");
     }
 
     private static void MemoryMutationsAcquireGlobalWriteLease()

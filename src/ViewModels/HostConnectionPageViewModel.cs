@@ -21,7 +21,7 @@ namespace ExHyperV.ViewModels;
 public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposable
 {
     private readonly HostProfileManager _profileManager;
-    private readonly IActiveHostSessionCoordinator _sessionCoordinator;
+    private readonly IHostSessionRegistry _sessionRegistry;
     private readonly HostDiagnosticPipeline _diagnosticPipeline;
     private readonly HostConfigurationPipeline _configurationPipeline;
     private readonly ISupportArtifactLocator _supportArtifactLocator;
@@ -54,19 +54,19 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
 
     public HostConnectionPageViewModel(
         HostProfileManager profileManager,
-        IActiveHostSessionCoordinator sessionCoordinator,
+        IHostSessionRegistry sessionRegistry,
         HostDiagnosticPipeline diagnosticPipeline,
         HostPreflightPipeline preflightPipeline,
         HostConfigurationPipeline configurationPipeline,
         ISupportArtifactLocator supportArtifactLocator)
     {
         _profileManager = profileManager;
-        _sessionCoordinator = sessionCoordinator;
+        _sessionRegistry = sessionRegistry ?? throw new ArgumentNullException(nameof(sessionRegistry));
         _diagnosticPipeline = diagnosticPipeline;
         _configurationPipeline = configurationPipeline;
         _supportArtifactLocator = supportArtifactLocator ?? throw new ArgumentNullException(nameof(supportArtifactLocator));
         Preflight = new HostPreflightViewModel(preflightPipeline);
-        _sessionCoordinator.StateChanged += OnSessionStateChanged;
+        _sessionRegistry.Changed += OnRegistryChanged;
         RefreshProfiles();
         UpdateActiveHostProperties();
     }
@@ -76,10 +76,8 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
     public bool CanConnectToSelectedHost =>
         SelectedHost?.Profile is { } profile
         && !IsSwitching
-        && _sessionCoordinator.Current.ActiveSession.Target.ProfileId != profile.Id
+        && !IsConnected(profile)
         && GetCurrentReport(profile)?.ManagementAvailable == true;
-    public bool CanSwitchToLocal =>
-        !IsSwitching && !_sessionCoordinator.Current.ActiveSession.Target.IsLocal;
     public string SelectedDisplayName => SelectedHost?.DisplayName ?? "未选择主机";
     public string SelectedAddress => SelectedHost?.Address ?? string.Empty;
     public string SelectedIdentity => SelectedHost?.Profile?.AuthenticationMode switch
@@ -93,13 +91,15 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         : SelectedHost?.Profile?.AuthenticationMode == HostAuthenticationMode.ExplicitCredential
             ? "仅本次会话"
             : "无需单独保存";
-    public string ActiveHostName => _sessionCoordinator.Current.ActiveSession.Target.DisplayName;
-    public string ActiveHostAddress => _sessionCoordinator.Current.ActiveSession.Target.IsLocal
+    public string ActiveHostName => SelectedSession?.Target.DisplayName ?? SelectedDisplayName;
+    public string ActiveHostAddress => SelectedSession?.Target.IsLocal == true
         ? Environment.MachineName
-        : _sessionCoordinator.Current.ActiveSession.Target.Address;
-    public string ActiveHostStatus => _sessionCoordinator.Current.ActiveSession.Target.IsLocal
-        ? "本机已连接"
-        : _sessionCoordinator.Current.ActiveSession.ConnectionState switch
+        : SelectedSession?.Target.Address ?? SelectedAddress;
+    public string ActiveHostStatus => SelectedSession is not { } session
+        ? "未连接"
+        : session.Target.IsLocal
+            ? "本机已连接"
+            : session.ConnectionState switch
         {
             HostConnectionState.Connected => "远程已连接",
             HostConnectionState.PartiallyAvailable => "远程部分可用",
@@ -108,38 +108,39 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
             HostConnectionState.Failed => "远程连接失败",
             _ => "远程状态未知"
         };
-    public MediaBrush ActiveHostStatusBrush => _sessionCoordinator.Current.ActiveSession.ConnectionState switch
+    public MediaBrush ActiveHostStatusBrush => SelectedSession?.ConnectionState switch
     {
         HostConnectionState.Connected or HostConnectionState.LocalConnected => UiStatusBrushes.Success,
         HostConnectionState.PartiallyAvailable or HostConnectionState.Reconnecting => UiStatusBrushes.Caution,
         HostConnectionState.RemoteDisconnected or HostConnectionState.Failed => UiStatusBrushes.Critical,
         _ => UiStatusBrushes.Neutral
     };
-    public string ActiveHostIdentity => _sessionCoordinator.Current.ActiveSession.Target.AuthenticationMode switch
+    public string ActiveHostIdentity => (SelectedSession?.Target.AuthenticationMode
+        ?? SelectedHost?.Profile?.AuthenticationMode) switch
     {
         HostAuthenticationMode.ExplicitCredential =>
-            _sessionCoordinator.Current.ActiveSession.Target.UserName ?? "显式凭据",
+            SelectedSession?.Target.UserName ?? SelectedHost?.Profile?.UserName ?? "显式凭据",
         _ => "当前 Windows 身份"
     };
     public string ActiveHostSnapshot
     {
         get
         {
-            HostBasicSnapshot? snapshot = _sessionCoordinator.Current.BasicSnapshot;
+            HostBasicSnapshot? snapshot = SelectedSession?.BasicSnapshot;
             return snapshot is null
-                ? _sessionCoordinator.Current.ActiveSession.Target.IsLocal ? "本地会话" : "等待宿主快照"
+                ? SelectedSession?.Target.IsLocal == true ? "本地会话" : "等待宿主快照"
                 : $"{snapshot.OperatingSystem} · {snapshot.VirtualMachineCount} 台虚拟机";
         }
     }
     public bool IsReconnectVisible =>
-        _sessionCoordinator.Current.ActiveSession.HasStaleData;
-    public bool IsReconnectActive => _sessionCoordinator.Current.Reconnect.IsActive;
+        SelectedSession?.HasStaleData == true;
+    public bool IsReconnectActive => SelectedSession?.Reconnect.IsActive == true;
     public string ReconnectSummary
     {
         get
         {
-            HostReconnectState reconnect = _sessionCoordinator.Current.Reconnect;
-            if (!_sessionCoordinator.Current.ActiveSession.HasStaleData) return string.Empty;
+            HostReconnectState reconnect = SelectedSession?.Reconnect ?? HostReconnectState.None;
+            if (SelectedSession?.HasStaleData != true) return string.Empty;
             if (!reconnect.IsActive)
                 return string.IsNullOrWhiteSpace(reconnect.LastError)
                     ? "自动重连已停止，当前保留断线前的旧数据。"
@@ -157,7 +158,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         {
             if (IsSwitching) return "正在准备并验证宿主快照";
             if (SelectedHost?.Profile is not { } profile) return "选择远程主机后可连接";
-            if (_sessionCoordinator.Current.ActiveSession.Target.ProfileId == profile.Id) return "当前已是活动主机";
+            if (IsConnected(profile)) return "该主机已连接";
             HostDiagnosticReport? report = GetCurrentReport(profile);
             if (report is null) return "请先运行连接检测";
             return report.ManagementAvailable ? "已检测，可以连接" : "WMI/DCOM 未通过，无法连接";
@@ -170,7 +171,6 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         InvalidateConfigurationRun();
         _switchCancellation?.Cancel();
         Preflight.ClearTarget();
-        _sessionCoordinator.SelectProfile(value?.Profile);
         OnSelectionPropertiesChanged();
         ApplyReport(value?.Profile is { } profile && _reports.TryGetValue(profile.Id, out HostDiagnosticReport? report)
             ? report
@@ -191,7 +191,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
     [RelayCommand]
     private void RefreshProfiles()
     {
-        Guid? selectedId = SelectedHost?.Profile?.Id ?? _sessionCoordinator.Current.SelectedProfile?.Id;
+        Guid? selectedId = SelectedHost?.Profile?.Id;
         try
         {
             var items = new List<HostProfileListItemViewModel>
@@ -227,9 +227,9 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
     private async Task EditSelectedHostAsync()
     {
         if (SelectedHost?.Profile is not { } profile) return;
-        if (_sessionCoordinator.Current.ActiveSession.Target.ProfileId == profile.Id)
+        if (IsConnected(profile))
         {
-            ShowTip("请先切回本机，再编辑当前活动主机的配置。" );
+            ShowTip("请先断开该主机连接，再编辑主机配置。" );
             return;
         }
         await EditProfileAsync(profile);
@@ -240,9 +240,9 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
     {
         HostProfile? profile = SelectedHost?.Profile;
         if (profile is null) return;
-        if (_sessionCoordinator.Current.ActiveSession.Target.ProfileId == profile.Id)
+        if (IsConnected(profile))
         {
-            ShowTip("请先切回本机，再删除当前活动主机的配置。" );
+            ShowTip("请先断开该主机连接，再删除主机配置。" );
             return;
         }
         string credentialText = profile.CredentialTarget is null
@@ -347,12 +347,17 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
     [RelayCommand]
     private void RetryReconnect()
     {
-        if (!_sessionCoordinator.RetryReconnectNow())
+        if (SelectedHost?.Profile is not { } profile
+            || !_sessionRegistry.RetryReconnectNow(HostId.FromProfile(profile)))
             ShowTip("重连任务正在执行或停止中，请稍候。" );
     }
 
     [RelayCommand]
-    private void StopReconnect() => _sessionCoordinator.StopReconnect();
+    private void StopReconnect()
+    {
+        if (SelectedHost?.Profile is { } profile)
+            _sessionRegistry.StopReconnect(HostId.FromProfile(profile));
+    }
 
     [RelayCommand]
     private void OpenLogs() => ReportArtifactLocation(
@@ -415,8 +420,8 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
             _reports[profile.Id] = diagnostic;
             RefreshProfileVisual(profile.Id, diagnostic);
             if (SelectedHost?.Profile?.Id == profile.Id) ApplyReport(diagnostic);
-            _sessionCoordinator.UpdateActiveChannels(
-                profile.Id,
+            _sessionRegistry.UpdateHostChannels(
+                HostId.FromProfile(profile),
                 diagnostic.ManagementAvailable ? HostChannelState.Available : HostChannelState.Unavailable,
                 diagnostic.ConsoleAvailable ? HostChannelState.Available : HostChannelState.Unavailable,
                 diagnostic.GetStep(HostDiagnosticStepKind.WmiDcom).Explanation);
@@ -454,7 +459,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
 
         bool confirmed = await Dialogs.ShowConfirmAsync(
             "连接到远程主机",
-            $"名称：{profile.DisplayName}\nIPv4：{profile.Address}\n身份：{SelectedIdentity}\n\n确认将此主机设为当前活动宿主吗？",
+            $"名称：{profile.DisplayName}\nIPv4：{profile.Address}\n身份：{SelectedIdentity}\n\n确认连接并将其虚拟机添加到虚拟机列表吗？",
             "确认连接",
             "取消",
             showIcon: true,
@@ -467,39 +472,13 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         IsSwitching = true;
         try
         {
-            HostSwitchRequest request = HostSwitchRequest.ForConfirmedDiagnostic(
+            HostConnectRequest request = HostConnectRequest.ForConfirmedDiagnostic(
                 profile,
                 report.ConsoleAvailable,
                 _transientCredentials.GetValueOrDefault(profile.Id));
-            HostSwitchResult result = await _sessionCoordinator.SwitchToSelectedAsync(
+            HostConnectResult result = await _sessionRegistry.ConnectAsync(
                 request,
                 _switchCancellation.Token);
-            if (result.Succeeded)
-                ShowSuccess(result.Message);
-            else
-                ShowError(result.Message);
-        }
-        finally
-        {
-            IsSwitching = false;
-            UpdateActiveHostProperties();
-        }
-    }
-
-    [RelayCommand(CanExecute = nameof(CanSwitchToLocal))]
-    private async Task SwitchToLocalAsync()
-    {
-        bool confirmed = await Dialogs.ShowConfirmAsync(
-            "切回本地计算机",
-            "确认结束当前远程宿主会话并切回本地计算机吗？",
-            "切回本机",
-            "取消");
-        if (!confirmed) return;
-
-        IsSwitching = true;
-        try
-        {
-            HostSwitchResult result = await _sessionCoordinator.SwitchToLocalAsync();
             if (result.Succeeded)
                 ShowSuccess(result.Message);
             else
@@ -622,7 +601,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         item?.UpdateReport(report);
     }
 
-    private void OnSessionStateChanged(object? sender, ActiveHostStateChangedEventArgs e)
+    private void OnRegistryChanged(object? sender, HostRegistryChangedEventArgs e)
     {
         System.Windows.Application.Current?.Dispatcher.InvokeAsync(UpdateActiveHostProperties);
     }
@@ -661,13 +640,27 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
             ? report
             : null;
 
+    private HostSessionSnapshot? SelectedSession
+    {
+        get
+        {
+            HostId hostId = SelectedHost?.Profile is { } profile
+                ? HostId.FromProfile(profile)
+                : HostId.Local;
+            return _sessionRegistry.Current.TryGet(hostId, out HostSessionSnapshot? session)
+                ? session
+                : null;
+        }
+    }
+
+    private bool IsConnected(HostProfile profile) =>
+        _sessionRegistry.Current.TryGet(HostId.FromProfile(profile), out _);
+
     private void NotifyConnectionEligibilityChanged()
     {
         OnPropertyChanged(nameof(CanConnectToSelectedHost));
-        OnPropertyChanged(nameof(CanSwitchToLocal));
         OnPropertyChanged(nameof(ConnectHint));
         ConnectToSelectedHostCommand.NotifyCanExecuteChanged();
-        SwitchToLocalCommand.NotifyCanExecuteChanged();
     }
 
     private static string StatusText(HostDiagnosticStepStatus status) => status switch
@@ -719,7 +712,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
 
     public void Dispose()
     {
-        _sessionCoordinator.StateChanged -= OnSessionStateChanged;
+        _sessionRegistry.Changed -= OnRegistryChanged;
         Preflight.Dispose();
         InvalidateConfigurationRun();
         InvalidateDiagnosticRun();

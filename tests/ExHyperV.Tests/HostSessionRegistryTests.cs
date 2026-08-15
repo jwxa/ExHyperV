@@ -9,7 +9,8 @@ internal static class HostSessionRegistryTests
         ("VmIdentity_ScopesVmIdToOwningHost", ScopesVmIdToOwningHost),
         ("HostRegistry_StartsWithFixedLocalSession", StartsWithFixedLocalSession),
         ("HostRegistry_ConnectsTwoRemoteHostsWithoutReplacingLocal", ConnectsTwoRemoteHostsWithoutReplacingLocal),
-        ("HostRegistry_ReconnectAdvancesOnlyTargetHostGeneration", ReconnectAdvancesOnlyTargetHostGeneration)
+        ("HostRegistry_ReconnectAdvancesOnlyTargetHostGeneration", ReconnectAdvancesOnlyTargetHostGeneration),
+        ("HostConnectionPage_UsesSharedRegistryWithoutLocalSwitch", HostConnectionPageUsesSharedRegistryWithoutLocalSwitch)
     ];
 
     private static void UsesProfileIdInsteadOfPresentation()
@@ -124,6 +125,46 @@ internal static class HostSessionRegistryTests
 
     private static HostSessionSnapshot Session(HostRegistrySnapshot snapshot, HostId hostId) =>
         snapshot.Hosts.Single(host => host.HostId == hostId);
+
+    private static void HostConnectionPageUsesSharedRegistryWithoutLocalSwitch()
+    {
+        string root = FindRepositoryRoot();
+        string viewModel = File.ReadAllText(Path.Combine(root, "src", "ViewModels", "HostConnectionPageViewModel.cs"));
+        string page = File.ReadAllText(Path.Combine(root, "src", "Views", "Pages", "HostConnectionPage.xaml"));
+        string codeBehind = File.ReadAllText(Path.Combine(root, "src", "Views", "Pages", "HostConnectionPage.xaml.cs"));
+        string app = File.ReadAllText(Path.Combine(root, "src", "App.xaml.cs"));
+
+        TestAssert.Contains("IHostSessionRegistry _sessionRegistry", viewModel);
+        TestAssert.Contains("_sessionRegistry.ConnectAsync", viewModel);
+        TestAssert.False(viewModel.Contains("SwitchToSelectedAsync(", StringComparison.Ordinal),
+            "The host connection page still switches a global active host.");
+        TestAssert.False(viewModel.Contains("SwitchToLocalAsync(", StringComparison.Ordinal),
+            "The host connection page still implements switch-to-local.");
+        TestAssert.False(page.Contains("SwitchToLocalCommand", StringComparison.Ordinal),
+            "The host connection page still renders a switch-to-local command.");
+        TestAssert.False(viewModel.Contains("当前活动宿主", StringComparison.Ordinal),
+            "The connection confirmation still describes a global active-host switch.");
+        TestAssert.False(page.Contains("正在切换", StringComparison.Ordinal),
+            "The connection button still describes connecting as a host switch.");
+        TestAssert.Contains("ActiveHostSessions.Registry", codeBehind);
+        TestAssert.Contains("ActiveHostSessions.Registry.Shutdown()", app);
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        foreach (string start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+        {
+            var directory = new DirectoryInfo(start);
+            while (directory is not null)
+            {
+                if (File.Exists(Path.Combine(directory.FullName, "src", "ExHyperV.csproj")))
+                    return directory.FullName;
+                directory = directory.Parent;
+            }
+        }
+
+        throw new DirectoryNotFoundException("Could not locate the repository root.");
+    }
 
     private static HostConnectRequest Request(HostProfile profile) => new(
         profile,

@@ -1,6 +1,8 @@
 using ExHyperV.Services.Remote.Consoles;
 using ExHyperV.Services.Remote.Profiles;
 using ExHyperV.Services.Remote.Sessions;
+using ExHyperV.Services.Remote.Vms;
+using ExHyperV.Tools;
 
 internal static class ConsoleSessionTests
 {
@@ -13,6 +15,7 @@ internal static class ConsoleSessionTests
         ("Console_InvalidVmIdRejectsCapture", InvalidVmIdRejectsCapture),
         ("Console_HostSwitchInvalidatesCapturedSession", HostSwitchInvalidatesCapturedSession),
         ("Console_WindowIdentityIsScopedToHostGeneration", WindowIdentityIsScopedToHostGeneration),
+        ("Console_RegistryCaptureUsesOwningHostId", RegistryCaptureUsesOwningHostId),
         ("Console_UnexpectedDisconnectReportsConnectionLoss", UnexpectedDisconnectReportsConnectionLoss)
     ];
 
@@ -133,6 +136,41 @@ internal static class ConsoleSessionTests
             "Console window identity was reused across host generations.");
     }
 
+    private static void RegistryCaptureUsesOwningHostId()
+    {
+        var registry = new HostSessionRegistry(new RegistryConsoleConnector(), new RegistryConsoleSnapshotLoader());
+        HostProfile profile = RemoteProfile("10.0.0.6");
+        HostId remoteHostId = HostId.FromProfile(profile);
+        Guid vmId = Guid.Parse("77777777-7777-7777-7777-777777777777");
+        try
+        {
+            HostConnectResult connected = registry.ConnectAsync(new HostConnectRequest(
+                profile,
+                HostChannelState.Available,
+                HostChannelState.Available)).GetAwaiter().GetResult();
+            TestAssert.True(connected.Succeeded, connected.Message);
+            var sessions = new ActiveHostConsoleSessions(registry);
+
+            ActiveHostConsoleSession local = sessions.Capture(
+                HostId.Local,
+                vmId.ToString(),
+                "同 ID 本机虚拟机").Session!;
+            ActiveHostConsoleSession remote = sessions.Capture(
+                remoteHostId,
+                vmId.ToString(),
+                "同 ID 远程虚拟机").Session!;
+
+            TestAssert.Equal("localhost", local.Server);
+            TestAssert.Equal(profile.Address, remote.Server);
+            TestAssert.False(local.WindowKey == remote.WindowKey,
+                "The same VM ID on different hosts reused one console window identity.");
+        }
+        finally
+        {
+            registry.Shutdown();
+        }
+    }
+
     private static void UnexpectedDisconnectReportsConnectionLoss()
     {
         string root = FindRepositoryRoot();
@@ -144,9 +182,11 @@ internal static class ConsoleSessionTests
         TestAssert.Contains("RdpHost.Disconnected +=", windowSource);
         TestAssert.Contains("RdpHost.FatalError +=", windowSource);
         TestAssert.Contains("ReportUnexpectedConnectionLossAsync", windowSource);
+        TestAssert.Contains("ActiveHostSessions.Registry", windowSource);
         TestAssert.Contains("_session.Target.IsLocal", viewModelSource);
         TestAssert.Contains("read.Value is null || !read.Value.IsRunning", viewModelSource);
-        TestAssert.Contains("ReportConnectionLoss(_session.Stamp, reason)", viewModelSource);
+        TestAssert.Contains("_sessionRegistry.ReportConnectionLoss(_session.Stamp, reason)", viewModelSource);
+        TestAssert.Contains("_session.Stamp,", viewModelSource);
     }
 
     private static HostProfile RemoteProfile(string address) =>
@@ -181,5 +221,40 @@ internal static class ConsoleSessionTests
         }
 
         throw new DirectoryNotFoundException("Could not locate the repository root.");
+    }
+
+    private sealed class RegistryConsoleConnection(WmiContext context) : IWmiHostManagementConnection
+    {
+        public WmiContext Context { get; } = context;
+    }
+
+    private sealed class RegistryConsoleCandidate(HostProfile profile) : IHostSessionCandidate
+    {
+        public HostTarget Target { get; } = HostTarget.FromProfile(profile);
+        public IHostManagementConnection ManagementConnection { get; } =
+            new RegistryConsoleConnection(WmiContext.RemoteCurrentWindowsIdentity(profile.Address));
+        public HostChannelState ManagementChannel => HostChannelState.Available;
+        public HostChannelState ConsoleChannel => HostChannelState.Available;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class RegistryConsoleConnector : IHostSessionConnector
+    {
+        public Task<IHostSessionCandidate> ConnectAsync(
+            HostSwitchRequest request,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IHostSessionCandidate>(new RegistryConsoleCandidate(request.Profile));
+    }
+
+    private sealed class RegistryConsoleSnapshotLoader : IHostBasicSnapshotLoader
+    {
+        public Task<HostBasicSnapshot> LoadAsync(
+            IHostSessionCandidate candidate,
+            CancellationToken cancellationToken) => Task.FromResult(new HostBasicSnapshot(
+                candidate.Target.DisplayName,
+                "Windows",
+                "Running",
+                1,
+                DateTimeOffset.UtcNow));
     }
 }
