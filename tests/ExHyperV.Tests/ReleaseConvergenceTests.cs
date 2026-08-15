@@ -71,6 +71,8 @@ internal static class ReleaseConvergenceTests
             "Host logs still use a hardcoded black background.");
         TestAssert.False(hostPage.Contains("#D0D0D0", StringComparison.OrdinalIgnoreCase),
             "Host logs still use a hardcoded gray foreground.");
+        TestAssert.False(hostPage.Contains("Foreground=\"White\"", StringComparison.OrdinalIgnoreCase),
+            "The host connection action still overrides theme-aware disabled text with white.");
         TestAssert.False(vmPage.Contains("#0B0B0B", StringComparison.OrdinalIgnoreCase),
             "The VM detail monitor still uses a hardcoded black background.");
         TestAssert.Contains("ControlFillColorSecondaryBrush", hostPage);

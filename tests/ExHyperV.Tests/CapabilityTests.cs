@@ -17,6 +17,8 @@ internal static class CapabilityTests
         ("Capabilities_CoordinatorGatesUseMatrixReasons", CoordinatorGatesUseMatrixReasons),
         ("Capabilities_PostConfigurationDiagnosticRefreshesActiveChannels", PostConfigurationDiagnosticRefreshesActiveChannels),
         ("Capabilities_RemoteVmLifecyclePolicyMatchesApprovedScope", RemoteVmLifecyclePolicyMatchesApprovedScope),
+        ("Capabilities_PermanentRemoteVmActionsAreHidden", PermanentRemoteVmActionsAreHidden),
+        ("Capabilities_TemporaryUnavailableVmActionsExplainReason", TemporaryUnavailableVmActionsExplainReason),
         ("Capabilities_LocalOnlyVmMutationEntrypointsHaveDirectGates", LocalOnlyVmMutationEntrypointsHaveDirectGates),
         ("Capabilities_MemoryMutationsAcquireGlobalWriteLease", MemoryMutationsAcquireGlobalWriteLease),
         ("Capabilities_LateVmListMappingRechecksHostGeneration", LateVmListMappingRechecksHostGeneration),
@@ -253,6 +255,51 @@ internal static class CapabilityTests
                 || entry.Contains("using (writeLease)", StringComparison.Ordinal),
                 $"{file}:{method} acquires a host write lease without a scoped release.");
         }
+    }
+
+    private static void PermanentRemoteVmActionsAreHidden()
+    {
+        string root = FindRepositoryRoot();
+        string xaml = File.ReadAllText(Path.Combine(
+            root, "src", "Views", "Pages", "VirtualMachinesPage.xaml"));
+        string renameSource = File.ReadAllText(Path.Combine(
+            root, "src", "ViewModels", "VirtualMachinesPageViewModel.Create.cs"));
+
+        AssertXamlElementContains(xaml, "ui:MenuItem", "OpenVmFolderCommand", "CanShowLocalVmSingleCommands");
+        AssertXamlElementContains(xaml, "ui:MenuItem", "RenameVmCommand", "CanShowLocalVmSingleCommands");
+        AssertXamlElementContains(xaml, "ui:MenuItem", "PurgeVmCommand", "IsLocalHostActive");
+        AssertXamlElementContains(xaml, "ui:MenuItem", "DeleteVmCommand", "IsLocalHostActive");
+        AssertXamlElementContains(xaml, "ui:Button", "CreateVmCommand", "IsLocalHostActive");
+        TestAssert.Contains("[RelayCommand(CanExecute = nameof(CanRenameVm))]", renameSource);
+        TestAssert.Contains("vm?.HostId.IsLocal == true", renameSource);
+    }
+
+    private static void TemporaryUnavailableVmActionsExplainReason()
+    {
+        string xaml = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(), "src", "Views", "Pages", "VirtualMachinesPage.xaml"));
+
+        AssertXamlElementContains(xaml, "ui:MenuItem", "MultiPowerCommand", "RemoteWriteUnavailableText");
+        AssertXamlElementContains(xaml, "ui:MenuItem", "PowerToggleAction", "RemoteWriteUnavailableText");
+        AssertXamlElementContains(xaml, "ui:Button", "CommandParameter=\"Start\"", "RemoteWriteUnavailableText");
+        AssertXamlElementContains(xaml, "ui:Button", "CommandParameter=\"Stop\"", "RemoteWriteUnavailableText");
+        AssertXamlElementContains(xaml, "ui:DropDownButton", "AreRemoteWritesAvailable", "RemoteWriteUnavailableText");
+    }
+
+    private static void AssertXamlElementContains(
+        string xaml,
+        string elementName,
+        string marker,
+        string expected)
+    {
+        System.Text.RegularExpressions.Match element = System.Text.RegularExpressions.Regex.Match(
+            xaml,
+            $@"<{System.Text.RegularExpressions.Regex.Escape(elementName)}\b(?=[^>]*{System.Text.RegularExpressions.Regex.Escape(marker)})[^>]*>",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant
+            | System.Text.RegularExpressions.RegexOptions.Singleline);
+        TestAssert.True(element.Success, $"Could not locate {elementName} containing {marker}.");
+        TestAssert.Contains(expected, element.Value);
+        TestAssert.Contains("ToolTipService.ShowOnDisabled=\"True\"", element.Value);
     }
 
     private static void VisibleConsoleButtonsExposeDisabledReason()

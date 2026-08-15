@@ -270,7 +270,7 @@
                             <ui:SymbolIcon Symbol="Delete24"/>
                         </ui:Button>
                         <ui:Button Command="{Binding DiagnoseSelectedHostCommand}"
-                                   IsEnabled="{Binding IsRemoteSelected}" Appearance="Secondary" Margin="0,0,8,0">
+                                   IsEnabled="{Binding CanDiagnoseSelectedHost}" Appearance="Secondary" Margin="0,0,8,0">
                             <ui:Button.Content>重新检测</ui:Button.Content>
                             <ui:Button.Icon>
                                 <ui:SymbolIcon Symbol="Pulse24"/>
@@ -288,7 +288,6 @@
                         <ui:Button Command="{Binding ConnectToSelectedHostCommand}"
                                    IsEnabled="{Binding CanExecuteConnectionAction}"
                                    Appearance="{Binding ConnectionActionAppearance}"
-                                   Foreground="White"
                                    ToolTip="{Binding ConnectionActionToolTip}" ToolTipService.ShowOnDisabled="True">
                             <StackPanel Orientation="Horizontal">
                                 <ui:ProgressRing Width="16" Height="16" IsIndeterminate="True" Margin="0,0,7,0"
@@ -480,7 +479,7 @@
                                                Visibility="{Binding IsDiagnosing, Converter={StaticResource BoolToVis}}"
                                                Appearance="Secondary" Content="取消" Margin="0,0,8,0"/>
                                     <ui:Button Command="{Binding DiagnoseSelectedHostCommand}"
-                                               IsEnabled="{Binding IsRemoteSelected}" Appearance="Primary">
+                                               IsEnabled="{Binding CanDiagnoseSelectedHost}" Appearance="Primary">
                                         <StackPanel Orientation="Horizontal">
                                             <ui:ProgressRing Width="16" Height="16" IsIndeterminate="True" Margin="0,0,7,0"
                                                              Visibility="{Binding IsDiagnosing, Converter={StaticResource BoolToVis}}"/>
@@ -922,7 +921,7 @@
                                     <ui:Button Content="{Binding NextButtonText}" Command="{Binding NextStepCommand}" Appearance="Primary"
                                                Visibility="{Binding IsPreviewStep, Converter={StaticResource BoolToVis}, ConverterParameter=Invert}"/>
                                     <ui:Button Command="{Binding DataContext.ApplyPreflightCommand, RelativeSource={RelativeSource AncestorType=Page}}"
-                                               IsEnabled="{Binding CanApply}" Appearance="Danger" Foreground="White"
+                                               IsEnabled="{Binding CanApply}" Appearance="Danger"
                                                Visibility="{Binding IsPreviewStep, Converter={StaticResource BoolToVis}}">
                                         <StackPanel Orientation="Horizontal">
                                             <ui:ProgressRing Width="16" Height="16" IsIndeterminate="True" Margin="0,0,7,0"

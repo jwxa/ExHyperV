@@ -37,13 +37,15 @@ namespace ExHyperV.ViewModels
         // 重命名
 
         // 1. 触发重命名模式
-        [RelayCommand]
+        [RelayCommand(CanExecute = nameof(CanRenameVm))]
         private void RenameVm(VmInstanceViewModel vm)
         {
             if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
             if (vm == null) return;
             vm.StartEditing();
         }
+
+        private bool CanRenameVm(VmInstanceViewModel? vm) => vm?.HostId.IsLocal == true;
 
         // 2. 取消重命名
         [RelayCommand]

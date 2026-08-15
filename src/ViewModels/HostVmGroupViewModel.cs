@@ -17,6 +17,14 @@ public partial class HostVmGroupViewModel : ObservableObject, IDisposable
         ApplySession(session);
     }
 
+    internal static IReadOnlyList<HostVmGroupViewModel> CreateOrdered(HostRegistrySnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        return Array.AsReadOnly(snapshot.Hosts
+            .Select((session, order) => new HostVmGroupViewModel(session, order))
+            .ToArray());
+    }
+
     public HostId HostId { get; }
     public int Order { get; }
     public bool IsLocal => HostId.IsLocal;

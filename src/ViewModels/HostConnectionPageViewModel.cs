@@ -93,11 +93,15 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
     public string RepairActionToolTip => CurrentRepairDecision.ActionToolTip;
     public string RepairGuidance => CurrentRepairDecision.Guidance;
     public bool HasRepairGuidance => !string.IsNullOrWhiteSpace(RepairGuidance);
+    public bool CanDiagnoseSelectedHost =>
+        IsRemoteSelected
+        && !IsDiagnosing
+        && !IsSwitching;
     public bool CanConnectToSelectedHost =>
         SelectedHost?.Profile is { } profile
         && !IsSwitching
-        && !IsConnected(profile)
-        && GetCurrentReport(profile)?.ManagementAvailable == true;
+        && !IsDiagnosing
+        && !IsConnected(profile);
     public bool CanExecuteConnectionAction
     {
         get
@@ -220,8 +224,10 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
             if (SelectedHost?.Profile is not { } profile) return "选择远程主机后可连接";
             if (IsConnected(profile)) return "该主机已连接";
             HostDiagnosticReport? report = GetCurrentReport(profile);
-            if (report is null) return "请先运行连接检测";
-            return report.ManagementAvailable ? "已检测，可以连接" : "WMI/DCOM 未通过，无法连接";
+            if (report is null) return "点击后将先运行最新连接检测";
+            return report.ManagementAvailable
+                ? "点击后将重新检测并连接"
+                : "上次检测未通过；点击后将重新检测";
         }
     }
 
@@ -240,9 +246,18 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
             : null);
     }
 
-    partial void OnIsDiagnosingChanged(bool value) => NotifyRepairStateChanged();
+    partial void OnIsDiagnosingChanged(bool value)
+    {
+        NotifyRepairStateChanged();
+        NotifyDiagnosticEligibilityChanged();
+        NotifyConnectionEligibilityChanged();
+    }
 
-    partial void OnIsSwitchingChanged(bool value) => NotifyConnectionEligibilityChanged();
+    partial void OnIsSwitchingChanged(bool value)
+    {
+        NotifyDiagnosticEligibilityChanged();
+        NotifyConnectionEligibilityChanged();
+    }
 
     partial void OnSelectedWorkspaceTabIndexChanged(int value)
     {
@@ -344,11 +359,17 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         }
     }
 
-    [RelayCommand(CanExecute = nameof(IsRemoteSelected))]
+    [RelayCommand(CanExecute = nameof(CanDiagnoseSelectedHost))]
     private async Task DiagnoseSelectedHostAsync()
     {
         HostProfile? profile = SelectedHost?.Profile;
         if (profile is null || IsDiagnosing) return;
+
+        _reports.Remove(profile.Id);
+        SelectedHost?.ResetReport();
+        ApplyReport(null);
+        CloseRepairWorkspace();
+
         WindowsCredential? transientCredential = _transientCredentials.GetValueOrDefault(profile.Id);
         if (profile.AuthenticationMode == HostAuthenticationMode.ExplicitCredential
             && profile.CredentialTarget is null
@@ -359,8 +380,6 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         }
 
         using HostDiagnosticRun diagnosticRun = _diagnosticRuns.Begin(profile.Id);
-        _reports.Remove(profile.Id);
-        CloseRepairWorkspace();
         IsDiagnosing = true;
         DiagnoseSelectedHostCommand.NotifyCanExecuteChanged();
         DiagnosticSummary = $"正在检测 {profile.DisplayName}...";
@@ -564,42 +583,66 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
             return;
         }
 
-        HostDiagnosticReport? report = profile is null ? null : GetCurrentReport(profile);
-        if (profile is null || report?.ManagementAvailable != true)
-        {
-            ShowTip("请先完成检测，并确认 WMI/DCOM 管理通道可用。" );
-            return;
-        }
-
-        bool confirmed = await Dialogs.ShowConfirmAsync(
-            "连接到远程主机",
-            $"名称：{profile.DisplayName}\nIPv4：{profile.Address}\n身份：{SelectedIdentity}\n\n确认连接并将其虚拟机添加到虚拟机列表吗？",
-            "确认连接",
-            "取消",
-            showIcon: true,
-            maxWidth: 420);
-        if (!confirmed) return;
+        if (profile is null) return;
 
         _switchCancellation?.Cancel();
         _switchCancellation?.Dispose();
-        _switchCancellation = new CancellationTokenSource();
+        var connectionCancellation = new CancellationTokenSource();
+        _switchCancellation = connectionCancellation;
         IsSwitching = true;
         try
         {
+            await DiagnoseSelectedHostAsync();
+            if (connectionCancellation.IsCancellationRequested
+                || SelectedHost?.Profile?.Id != profile.Id)
+                return;
+
+            HostDiagnosticReport? report = GetCurrentReport(profile);
+            if (report is null)
+            {
+                SelectedWorkspaceTabIndex = 1;
+                return;
+            }
+            if (!report.ManagementAvailable)
+            {
+                SelectedWorkspaceTabIndex = 1;
+                ShowError("最新连接检测未通过 WMI/DCOM 管理通道，未建立远程宿主会话。");
+                return;
+            }
+
+            bool confirmed = await Dialogs.ShowConfirmAsync(
+                "连接到远程主机",
+                $"名称：{profile.DisplayName}\nIPv4：{profile.Address}\n身份：{SelectedIdentity}\n\n最新连接检测已通过。确认连接并将其虚拟机添加到虚拟机列表吗？",
+                "确认连接",
+                "取消",
+                showIcon: true,
+                maxWidth: 420);
+            if (!confirmed
+                || connectionCancellation.IsCancellationRequested
+                || SelectedHost?.Profile?.Id != profile.Id)
+                return;
+
             HostConnectRequest request = HostConnectRequest.ForConfirmedDiagnostic(
                 profile,
                 report.ConsoleAvailable,
                 _transientCredentials.GetValueOrDefault(profile.Id));
             HostConnectResult result = await _sessionRegistry.ConnectAsync(
                 request,
-                _switchCancellation.Token);
+                connectionCancellation.Token);
             if (result.Succeeded)
                 ShowSuccess(result.Message);
             else
                 ShowError(result.Message);
         }
+        catch (OperationCanceledException) when (connectionCancellation.IsCancellationRequested)
+        {
+            // Selection changes and explicit cancellation leave every host session unchanged.
+        }
         finally
         {
+            if (ReferenceEquals(_switchCancellation, connectionCancellation))
+                _switchCancellation = null;
+            connectionCancellation.Dispose();
             IsSwitching = false;
             UpdateSelectedHostProperties();
         }
@@ -780,9 +823,15 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         OnPropertyChanged(nameof(SelectedCredentialStorage));
         EditSelectedHostCommand.NotifyCanExecuteChanged();
         DeleteSelectedHostCommand.NotifyCanExecuteChanged();
-        DiagnoseSelectedHostCommand.NotifyCanExecuteChanged();
+        NotifyDiagnosticEligibilityChanged();
         NotifyRepairStateChanged();
         UpdateSelectedHostProperties();
+    }
+
+    private void NotifyDiagnosticEligibilityChanged()
+    {
+        OnPropertyChanged(nameof(CanDiagnoseSelectedHost));
+        DiagnoseSelectedHostCommand.NotifyCanExecuteChanged();
     }
 
     private HostRepairDecision CurrentRepairDecision => SelectedHost?.Profile is { } profile
@@ -924,6 +973,12 @@ public partial class HostProfileListItemViewModel : ObservableObject
         var item = new HostProfileListItemViewModel(profile, profile.DisplayName, profile.Address, "未检测", UiStatusBrushes.Caution);
         if (report is not null) item.UpdateReport(report);
         return item;
+    }
+
+    public void ResetReport()
+    {
+        StateText = "未检测";
+        StateBrush = UiStatusBrushes.Caution;
     }
 
     public void UpdateReport(HostDiagnosticReport report)

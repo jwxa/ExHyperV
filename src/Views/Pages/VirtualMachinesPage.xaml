@@ -56,6 +56,8 @@
                         <!-- 多选电源：全部运行→关机，否则→启动。仅多选时显示。 -->
                         <ui:MenuItem Header="{Binding PlacementTarget.Tag.MultiPowerToggleText, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
              Command="{Binding PlacementTarget.Tag.MultiPowerCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+             ToolTip="{Binding PlacementTarget.Tag.RemoteWriteUnavailableText, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+             ToolTipService.ShowOnDisabled="True"
              Visibility="{Binding PlacementTarget.Tag.IsMultiSelect, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}">
                             <ui:MenuItem.Icon>
                                 <ui:SymbolIcon Symbol="Power24" />
@@ -66,17 +68,19 @@
                         <!-- 启动/关机切换：运行中显示"关机"(Stop=优雅失败则硬关)，否则"启动"。多选时隐藏。 -->
                         <ui:MenuItem Header="{Binding PowerToggleText}"
              Command="{Binding ControlCommand}" CommandParameter="{Binding PowerToggleAction}"
+             ToolTip="{Binding PlacementTarget.Tag.RemoteWriteUnavailableText, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+             ToolTipService.ShowOnDisabled="True"
              Visibility="{Binding PlacementTarget.Tag.IsSingleOrNoneSelect, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}">
                             <ui:MenuItem.Icon>
                                 <ui:SymbolIcon Symbol="Power24" />
                             </ui:MenuItem.Icon>
                         </ui:MenuItem>
-                        <Separator Visibility="{Binding PlacementTarget.Tag.IsSingleOrNoneSelect, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}"/>
+                        <Separator Visibility="{Binding PlacementTarget.Tag.CanShowLocalVmSingleCommands, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}"/>
 
                         <ui:MenuItem Header="{x:Static properties:Resources.VmPage_MenuOpenFolder}"
              Command="{Binding PlacementTarget.Tag.OpenVmFolderCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
              CommandParameter="{Binding}"
-             Visibility="{Binding PlacementTarget.Tag.IsSingleOrNoneSelect, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}"
+             Visibility="{Binding PlacementTarget.Tag.CanShowLocalVmSingleCommands, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}"
              IsEnabled="{Binding PlacementTarget.Tag.CanUseLocalFiles, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
              ToolTipService.ShowOnDisabled="True"
              ToolTip="{Binding PlacementTarget.Tag.LocalFileUnavailableText, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
@@ -84,13 +88,13 @@
                                 <ui:SymbolIcon Symbol="FolderOpen24" />
                             </ui:MenuItem.Icon>
                         </ui:MenuItem>
-                        <Separator Visibility="{Binding PlacementTarget.Tag.IsSingleOrNoneSelect, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}"/>
+                        <Separator Visibility="{Binding PlacementTarget.Tag.CanShowLocalVmSingleCommands, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}"/>
 
                         <!-- 重命名选项 -->
                         <ui:MenuItem Header="{x:Static properties:Resources.Xaml_Rename}"
                              Command="{Binding PlacementTarget.Tag.RenameVmCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                              CommandParameter="{Binding}"
-                              Visibility="{Binding PlacementTarget.Tag.IsSingleOrNoneSelect, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}"
+                              Visibility="{Binding PlacementTarget.Tag.CanShowLocalVmSingleCommands, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}"
                               IsEnabled="{Binding PlacementTarget.Tag.CanUseLocalVmFeatures, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                               ToolTipService.ShowOnDisabled="True"
                               ToolTip="{Binding PlacementTarget.Tag.RemoteFeatureUnavailableText, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
@@ -99,10 +103,11 @@
                             </ui:MenuItem.Icon>
                         </ui:MenuItem>
 
-                        <Separator Visibility="{Binding PlacementTarget.Tag.IsSingleOrNoneSelect, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}"/>
+                        <Separator Visibility="{Binding PlacementTarget.Tag.CanShowLocalVmSingleCommands, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}"/>
                         <ui:MenuItem Header="{x:Static properties:Resources.VmPage_PurgeBtn}"
              Command="{Binding PlacementTarget.Tag.PurgeVmCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
              CommandParameter="{Binding}"
+             Visibility="{Binding PlacementTarget.Tag.IsLocalHostActive, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}"
              Foreground="{ui:ThemeResource SystemFillColorCriticalBrush}"
              IsEnabled="{Binding PlacementTarget.Tag.CanUseLocalFiles, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
              ToolTipService.ShowOnDisabled="True"
@@ -116,6 +121,7 @@
                         <ui:MenuItem Header="{x:Static properties:Resources.Xaml_Delete}" 
                              Command="{Binding PlacementTarget.Tag.DeleteVmCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                              CommandParameter="{Binding}"
+                              Visibility="{Binding PlacementTarget.Tag.IsLocalHostActive, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVis}}"
                               Foreground="{ui:ThemeResource SystemFillColorCriticalBrush}"
                               IsEnabled="{Binding PlacementTarget.Tag.CanUseLocalVmFeatures, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                               ToolTipService.ShowOnDisabled="True"
@@ -300,6 +306,8 @@
                                                        Padding="41,6" Height="36" CornerRadius="8" BorderThickness="0"
                                                        HorizontalAlignment="Center" HorizontalContentAlignment="Center"
                                                        Command="{Binding ControlCommand}" 
+                                                       ToolTip="{Binding DataContext.RemoteWriteUnavailableText, RelativeSource={RelativeSource AncestorType=Page}}"
+                                                       ToolTipService.ShowOnDisabled="True"
                                                        CommandParameter="Start">
                                                 <ui:Button.Style>
                                                     <Style TargetType="ui:Button" BasedOn="{StaticResource {x:Type ui:Button}}">
@@ -329,11 +337,16 @@
                                                 </Grid.ColumnDefinitions>
                                                 <ui:Button Grid.Column="0" Content="{x:Static properties:Resources.Button_ShutDown}" Icon="Stop24" Appearance="Danger" Foreground="White"
            Padding="24,0" Height="36" CornerRadius="8,0,0,8" BorderThickness="0" Margin="0" VerticalContentAlignment="Center"
+           ToolTip="{Binding DataContext.RemoteWriteUnavailableText, RelativeSource={RelativeSource AncestorType=Page}}"
+           ToolTipService.ShowOnDisabled="True"
            Command="{Binding ControlCommand}" CommandParameter="Stop"/>
                                                 <ui:DropDownButton Grid.Column="1" Icon="ChevronDown24" Foreground="White"
                    Background="{DynamicResource App.DangerBrush}"
                    MouseOverBackground="{DynamicResource App.DangerBrushPointerOver}"
                    PressedBackground="{DynamicResource App.DangerBrushPressed}"
+                   IsEnabled="{Binding DataContext.AreRemoteWritesAvailable, RelativeSource={RelativeSource AncestorType=Page}}"
+                   ToolTip="{Binding DataContext.RemoteWriteUnavailableText, RelativeSource={RelativeSource AncestorType=Page}}"
+                   ToolTipService.ShowOnDisabled="True"
                    Padding="6,0,10,0" Height="36" CornerRadius="0,8,8,0" BorderThickness="0" Margin="0" VerticalContentAlignment="Center">
                                                     <ui:DropDownButton.Flyout>
                                                         <ContextMenu>
@@ -748,6 +761,7 @@
                Height="24"
                Icon="{ui:SymbolIcon Symbol=Add24}"
                Appearance="Secondary"
+               Visibility="{Binding IsLocalHostActive, Converter={StaticResource BoolToVis}}"
                ToolTip="{Binding CreateVmToolTip}"
                ToolTipService.ShowOnDisabled="True"
                IsEnabled="{Binding CanUseLocalFiles}"

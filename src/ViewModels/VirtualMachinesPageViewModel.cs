@@ -63,6 +63,7 @@ namespace ExHyperV.ViewModels
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(IsLocalHostActive))]
         [NotifyPropertyChangedFor(nameof(CanUseLocalVmFeatures))]
+        [NotifyPropertyChangedFor(nameof(CanShowLocalVmSingleCommands))]
         private bool _isRemoteHostActive;
         private HostCapabilityMatrix _capabilities =
             HostCapabilityMatrix.Create(ActiveHostSession.CreateLocal(), isSwitching: false);
@@ -124,8 +125,11 @@ namespace ExHyperV.ViewModels
                 ?? new HostOperationRouter(_sessionRegistry, new HostWmiContextResolver());
             _hostConsoleSessions = new HostConsoleSessions(_sessionRegistry);
 
-            foreach (HostSessionSnapshot session in _sessionRegistry.Current.Hosts)
-                EnsureHostGroup(session);
+            foreach (HostVmGroupViewModel group in HostVmGroupViewModel.CreateOrdered(_sessionRegistry.Current))
+            {
+                HostGroups.Add(group);
+                ConfigureHostVmView(group);
+            }
             ApplySelectedHost(HostGroups[0]);
             ConfigureVmListView();
             _sessionRegistry.Changed += OnHostRegistryChanged;
@@ -300,12 +304,17 @@ namespace ExHyperV.ViewModels
 
         private new bool TryBeginHostWrite(
             HostCapabilityKind requiredCapability,
+            out IHostWriteLease? lease) =>
+            TryBeginHostWrite(SelectedHostGroup.HostId, requiredCapability, out lease);
+
+        private bool TryBeginHostWrite(
+            HostId hostId,
+            HostCapabilityKind requiredCapability,
             out IHostWriteLease? lease)
         {
-            HostVmGroupViewModel group = SelectedHostGroup;
             lease = null;
-            if (!EnsureHostCapability(group.HostId, requiredCapability)) return false;
-            if (_sessionRegistry.TryBeginWrite(group.HostId, out lease, out string reason)) return true;
+            if (!EnsureHostCapability(hostId, requiredCapability)) return false;
+            if (_sessionRegistry.TryBeginWrite(hostId, out lease, out string reason)) return true;
             ShowTip(reason);
             return false;
         }
@@ -353,7 +362,7 @@ namespace ExHyperV.ViewModels
         private void RebuildVmList(VmKey? preferredSelection = null)
         {
             VmKey? selectedKey = preferredSelection ?? SelectedVm?.VmKey;
-            List<VmInstanceViewModel> previousSelection = _selectedVms.ToList();
+            List<VmInstanceViewModel> previousSelection = _vmSelection.Items.ToList();
             VmList.Clear();
             foreach (HostVmGroupViewModel group in HostGroups.OrderBy(group => group.Order))
             {
@@ -365,18 +374,34 @@ namespace ExHyperV.ViewModels
                     ?? previousSelection.LastOrDefault(VmList.Contains)
                     ?? VmList.FirstOrDefault()
                 : SelectedVm ?? VmList.FirstOrDefault();
-            _selectedVms = previousSelection
+            List<VmInstanceViewModel> retainedSelection = previousSelection
                 .Where(vm => VmList.Contains(vm) && vm.HostId == SelectedVm?.HostId)
                 .ToList();
-            if (_selectedVms.Count == 0 && SelectedVm is not null) _selectedVms.Add(SelectedVm);
-            SelectedVmCount = _selectedVms.Count;
+            if (retainedSelection.Count == 0 && SelectedVm is not null) retainedSelection.Add(SelectedVm);
+            if (retainedSelection.Count > 0)
+                _vmSelection.Replace(retainedSelection[0].HostId, retainedSelection);
+            else
+                _vmSelection.Clear();
+            SelectedVmCount = _vmSelection.Count;
         }
 
         private void RemoveVmFromLists(VmInstanceViewModel vm)
         {
             vm.HostGroup.Vms.Remove(vm);
             VmList.Remove(vm);
-            if (SelectedVm == vm) SelectedVm = VmList.FirstOrDefault();
+            if (_vmSelection.Items.Contains(vm))
+            {
+                VmInstanceViewModel[] remaining = _vmSelection.Items
+                    .Where(candidate => !ReferenceEquals(candidate, vm) && VmList.Contains(candidate))
+                    .ToArray();
+                if (remaining.Length > 0)
+                    _vmSelection.Replace(remaining[0].HostId, remaining);
+                else
+                    _vmSelection.Clear();
+                SelectedVmCount = _vmSelection.Count;
+            }
+            if (SelectedVm == vm)
+                SelectedVm = _vmSelection.Items.LastOrDefault() ?? VmList.FirstOrDefault();
         }
 
 
@@ -447,44 +472,44 @@ namespace ExHyperV.ViewModels
         }
 
         // 多选状态：code-behind 的 ListView.SelectionChanged 推进来。>1 时右键菜单只留删除/彻底删除，且按整批操作。
-        private List<VmInstanceViewModel> _selectedVms = new();
+        private readonly SingleHostSelection<VmInstanceViewModel> _vmSelection =
+            new(vm => vm.HostId);
 
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(IsMultiSelect))]
         [NotifyPropertyChangedFor(nameof(IsSingleOrNoneSelect))]
         [NotifyPropertyChangedFor(nameof(MultiPowerToggleText))]
+        [NotifyPropertyChangedFor(nameof(CanShowLocalVmSingleCommands))]
         private int _selectedVmCount;
 
         public bool IsMultiSelect => SelectedVmCount > 1;
         public bool IsSingleOrNoneSelect => SelectedVmCount <= 1;
+        public bool CanShowLocalVmSingleCommands => IsLocalHostActive && IsSingleOrNoneSelect;
 
         // 多选电源按钮：全部在运行→关机(把运行中的全关)，否则→启动(把未运行的都拉起，已运行的不动)。
-        public string MultiPowerToggleText => _selectedVms.Count > 0 && _selectedVms.All(v => v.IsRunning)
+        public string MultiPowerToggleText => _vmSelection.Count > 0 && _vmSelection.Items.All(v => v.IsRunning)
             ? Properties.Resources.Button_ShutDown
             : Properties.Resources.Button_Start;
 
-        public void UpdateSelection(HostId hostId, System.Collections.IList items)
+        public HostId? UpdateSelection(HostId hostId, System.Collections.IList items)
         {
             List<VmInstanceViewModel> selected = items?.Cast<VmInstanceViewModel>().ToList() ?? [];
-            if (selected.Any(vm => vm.HostId != hostId))
-                throw new ArgumentException("虚拟机选择必须属于同一宿主。", nameof(items));
-
-            _selectedVms = selected;
-            if (_selectedVms.Count > 0) SelectedVm = _selectedVms[^1];
-            SelectedVmCount = _selectedVms.Count;
+            HostId? previousHostId = _vmSelection.Replace(hostId, selected);
+            if (selected.Count > 0)
+                SelectedVm = selected[^1];
+            else if (_vmSelection.Count == 0)
+                SelectedVm = null;
+            SelectedVmCount = _vmSelection.Count;
+            return previousHostId;
         }
 
         [RelayCommand(CanExecute = nameof(CanExecuteVmWrite))]
         private async Task MultiPowerAsync()
         {
-            var targets = _selectedVms.ToList();
-            if (targets.Count == 0) return;
-            HostId hostId = targets[0].HostId;
-            if (targets.Any(vm => vm.HostId != hostId))
-            {
-                ShowTip("批量操作只能选择同一宿主中的虚拟机。");
-                return;
-            }
+            HostScopedSelection<VmInstanceViewModel>? selection = _vmSelection.Capture();
+            if (selection is null) return;
+            IReadOnlyList<VmInstanceViewModel> targets = selection.Items;
+            HostId hostId = selection.HostId;
             if (!EnsureHostCapability(hostId, HostCapabilityKind.VmWrite)) return;
             bool allRunning = targets.All(v => v.IsRunning);
             string action = allRunning ? "Stop" : "Start";
@@ -526,10 +551,14 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task DeleteVmAsync(VmInstanceViewModel vm)
         {
-            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
-            if (IsMultiSelect) { await DeleteMultipleAsync(_selectedVms.ToList()); return; }
             if (vm == null) return;
-            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            if (IsMultiSelect && _vmSelection.Capture() is { } selection)
+            {
+                await DeleteMultipleAsync(selection);
+                return;
+            }
+            if (!EnsureHostCapability(vm.HostId, HostCapabilityKind.VmAdvancedSettings)) return;
+            if (!TryBeginHostWrite(vm.HostId, HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
             using var writeScope = writeLease;
             IsLoading = true;
 
@@ -553,16 +582,17 @@ namespace ExHyperV.ViewModels
         }
 
         // 批量删除（保留磁盘）：确认 → 逐台删 → 聚合汇报 → 收拾选中项。
-        private async Task DeleteMultipleAsync(List<VmInstanceViewModel> targets)
+        private async Task DeleteMultipleAsync(HostScopedSelection<VmInstanceViewModel> selection)
         {
-            if (!EnsureHostCapability(HostCapabilityKind.VmAdvancedSettings)) return;
+            IReadOnlyList<VmInstanceViewModel> targets = selection.Items;
+            if (!EnsureHostCapability(selection.HostId, HostCapabilityKind.VmAdvancedSettings)) return;
             if (targets.Count == 0) return;
             bool ok = await Dialogs.ShowConfirmAsync(
                 Properties.Resources.VmPage_MultiDeleteTitle,
                 string.Format(Properties.Resources.VmPage_MultiDeleteConfirm, targets.Count),
                 Properties.Resources.Xaml_Delete, Properties.Resources.Button_Cancel, isDanger: true);
             if (!ok) return;
-            if (!TryBeginHostWrite(HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
+            if (!TryBeginHostWrite(selection.HostId, HostCapabilityKind.VmAdvancedSettings, out IHostWriteLease? writeLease)) return;
             using var writeScope = writeLease;
 
             IsLoading = true;
@@ -583,9 +613,10 @@ namespace ExHyperV.ViewModels
         }
 
         // 批量彻底删除：不逐台展开文件预览（台数多会撑爆），改用名称清单确认 → 逐台彻底删 → 聚合汇报。
-        private async Task PurgeMultipleAsync(List<VmInstanceViewModel> targets)
+        private async Task PurgeMultipleAsync(HostScopedSelection<VmInstanceViewModel> selection)
         {
-            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
+            IReadOnlyList<VmInstanceViewModel> targets = selection.Items;
+            if (!EnsureHostCapability(selection.HostId, HostCapabilityKind.LocalFileSystem)) return;
             if (targets.Count == 0) return;
             string list = string.Join("\n", targets.Select(t => "· " + t.Name));
             bool ok = await Dialogs.ShowConfirmAsync(
@@ -593,7 +624,7 @@ namespace ExHyperV.ViewModels
                 string.Format(Properties.Resources.VmPage_MultiPurgeConfirm, targets.Count) + "\n\n" + list,
                 Properties.Resources.VmPage_PurgeBtn, Properties.Resources.Button_Cancel, isDanger: true);
             if (!ok) return;
-            if (!TryBeginHostWrite(HostCapabilityKind.LocalFileSystem, out IHostWriteLease? writeLease)) return;
+            if (!TryBeginHostWrite(selection.HostId, HostCapabilityKind.LocalFileSystem, out IHostWriteLease? writeLease)) return;
             using var writeScope = writeLease;
 
             IsLoading = true;
@@ -616,9 +647,13 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private async Task PurgeVmAsync(VmInstanceViewModel vm)
         {
-            if (!EnsureHostCapability(HostCapabilityKind.LocalFileSystem)) return;
-            if (IsMultiSelect) { await PurgeMultipleAsync(_selectedVms.ToList()); return; }
             if (vm == null) return;
+            if (IsMultiSelect && _vmSelection.Capture() is { } selection)
+            {
+                await PurgeMultipleAsync(selection);
+                return;
+            }
+            if (!EnsureHostCapability(vm.HostId, HostCapabilityKind.LocalFileSystem)) return;
 
             // 二次确认弹窗：预先算出"将删除的目录与文件"清单直接展示——替代口头提醒用户自己去查目录里有没有其他文件。
             var preview = await VmDeleteService.PreviewPurgeAsync(vm.Id);
@@ -670,7 +705,7 @@ namespace ExHyperV.ViewModels
 
             var result = await dialog.ShowDialogAsync();
             if (result != Wpf.Ui.Controls.MessageBoxResult.Primary) return;
-            if (!TryBeginHostWrite(HostCapabilityKind.LocalFileSystem, out IHostWriteLease? writeLease)) return;
+            if (!TryBeginHostWrite(vm.HostId, HostCapabilityKind.LocalFileSystem, out IHostWriteLease? writeLease)) return;
             using var writeScope = writeLease;
 
             IsLoading = true;

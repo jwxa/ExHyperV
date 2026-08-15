@@ -7,6 +7,7 @@ internal static class HostRepairRecommendationTests
     [
         ("RepairEntry_HealthyDiagnosticHasNoActionOrGuidance", HealthyDiagnosticHasNoActionOrGuidance),
         ("RepairEntry_ConsoleFailureOffersContextualRepair", ConsoleFailureOffersContextualRepair),
+        ("RepairEntry_IcmpFailureDoesNotOverrideChannelResults", IcmpFailureDoesNotOverrideChannelResults),
         ("RepairEntry_AccessDeniedOffersReadOnlyInspection", AccessDeniedOffersReadOnlyInspection),
         ("RepairEntry_InvalidCredentialProvidesGuidanceOnly", InvalidCredentialProvidesGuidanceOnly),
         ("RepairEntry_MissingNamespaceProvidesGuidanceOnly", MissingNamespaceProvidesGuidanceOnly),
@@ -50,6 +51,34 @@ internal static class HostRepairRecommendationTests
 
         TestAssert.True(decision.CanOfferRepair, "A valid identity with WMI/Hyper-V access denied did not offer inspection.");
         TestAssert.Contains("权限", decision.ActionToolTip);
+    }
+
+    private static void IcmpFailureDoesNotOverrideChannelResults()
+    {
+        HostProfile profile = Profile();
+        HostRepairDecision consoleRepair = HostRepairAdvisor.Evaluate(
+            profile,
+            Report(
+                profile,
+                HostDiagnosticErrorCode.None,
+                HostDiagnosticErrorCode.ConnectionRefused,
+                ipv4Error: HostDiagnosticErrorCode.Timeout));
+        HostRepairDecision healthyChannels = HostRepairAdvisor.Evaluate(
+            profile,
+            Report(
+                profile,
+                HostDiagnosticErrorCode.None,
+                HostDiagnosticErrorCode.None,
+                ipv4Error: HostDiagnosticErrorCode.Timeout));
+
+        TestAssert.True(
+            consoleRepair.CanOfferRepair,
+            "An ICMP timeout hid the repair action for a working WMI channel and failed TCP 2179 channel.");
+        TestAssert.Contains("TCP 2179", consoleRepair.ActionToolTip);
+        TestAssert.False(
+            healthyChannels.CanOfferRepair,
+            "An ICMP timeout exposed repair even though both product channels succeeded.");
+        TestAssert.Equal(string.Empty, healthyChannels.Guidance);
     }
 
     private static void InvalidCredentialProvidesGuidanceOnly()
@@ -128,8 +157,12 @@ internal static class HostRepairRecommendationTests
         HostProfile profile,
         HostDiagnosticErrorCode managementError,
         HostDiagnosticErrorCode consoleError,
-        HostDiagnosticErrorCode identityError = HostDiagnosticErrorCode.None)
+        HostDiagnosticErrorCode identityError = HostDiagnosticErrorCode.None,
+        HostDiagnosticErrorCode ipv4Error = HostDiagnosticErrorCode.None)
     {
+        HostDiagnosticStepStatus ipv4Status = ipv4Error == HostDiagnosticErrorCode.None
+            ? HostDiagnosticStepStatus.Succeeded
+            : HostDiagnosticStepStatus.Failed;
         HostDiagnosticStepStatus identityStatus = identityError == HostDiagnosticErrorCode.None
             ? HostDiagnosticStepStatus.Succeeded
             : HostDiagnosticStepStatus.Failed;
@@ -156,7 +189,7 @@ internal static class HostRepairRecommendationTests
             TimeSpan.FromSeconds(1),
             availability,
             [
-                new(HostDiagnosticStepKind.Ipv4Reachability, HostDiagnosticStepStatus.Succeeded, TimeSpan.Zero, "IPv4 可达。"),
+                new(HostDiagnosticStepKind.Ipv4Reachability, ipv4Status, TimeSpan.Zero, "IPv4 探测结果。", ipv4Error),
                 new(HostDiagnosticStepKind.Identity, identityStatus, TimeSpan.Zero, "身份结果。", identityError),
                 new(HostDiagnosticStepKind.WmiDcom, managementStatus, TimeSpan.Zero, "管理通道结果。", managementError),
                 new(HostDiagnosticStepKind.Tcp2179, consoleStatus, TimeSpan.Zero, "控制台通道结果。", consoleError)

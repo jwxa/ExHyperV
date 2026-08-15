@@ -33,7 +33,6 @@ namespace ExHyperV.Views
         private void VmList_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (_isSynchronizingVmSelection
-                || e.AddedItems.Count == 0
                 || sender is not System.Windows.Controls.ListView lv
                 || lv.DataContext is not HostVmGroupViewModel group
                 || DataContext is not VirtualMachinesPageViewModel vm)
@@ -42,11 +41,14 @@ namespace ExHyperV.Views
             _isSynchronizingVmSelection = true;
             try
             {
+                var previousHostId = vm.UpdateSelection(group.HostId, lv.SelectedItems);
                 foreach (System.Windows.Controls.ListView other in FindVisualChildren<System.Windows.Controls.ListView>(HostGroupsList))
                 {
-                    if (!ReferenceEquals(other, lv)) other.UnselectAll();
+                    if (previousHostId is { } previous
+                        && other.DataContext is HostVmGroupViewModel otherGroup
+                        && otherGroup.HostId == previous)
+                        other.UnselectAll();
                 }
-                vm.UpdateSelection(group.HostId, lv.SelectedItems);
             }
             finally
             {

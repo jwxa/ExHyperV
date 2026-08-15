@@ -12,7 +12,8 @@ internal static class HostSessionRegistryTests
         ("HostRegistry_FailedConnectDoesNotPublishPartialHost", FailedConnectDoesNotPublishPartialHost),
         ("HostRegistry_ReconnectAdvancesOnlyTargetHostGeneration", ReconnectAdvancesOnlyTargetHostGeneration),
         ("HostRegistry_BasicSnapshotUsesLocaleIndependentVmSummary", BasicSnapshotUsesLocaleIndependentVmSummary),
-        ("HostConnectionPage_UsesSharedRegistryWithoutLocalSwitch", HostConnectionPageUsesSharedRegistryWithoutLocalSwitch)
+        ("HostConnectionPage_UsesSharedRegistryWithoutLocalSwitch", HostConnectionPageUsesSharedRegistryWithoutLocalSwitch),
+        ("HostConnectionPage_RefreshesDiagnosticBeforeEveryConnect", RefreshesDiagnosticBeforeEveryConnect)
     ];
 
     private static void UsesProfileIdInsteadOfPresentation()
@@ -213,6 +214,55 @@ internal static class HostSessionRegistryTests
         TestAssert.Contains(
             "UpdateSelectedHostProperties();",
             viewModel[selectionUpdateStart..selectionUpdateEnd]);
+    }
+
+    private static void RefreshesDiagnosticBeforeEveryConnect()
+    {
+        string root = FindRepositoryRoot();
+        string viewModel = File.ReadAllText(Path.Combine(root, "src", "ViewModels", "HostConnectionPageViewModel.cs"));
+        string page = File.ReadAllText(Path.Combine(root, "src", "Views", "Pages", "HostConnectionPage.xaml"));
+
+        string connectEligibility = Slice(
+            viewModel,
+            "public bool CanConnectToSelectedHost =>",
+            "public bool CanExecuteConnectionAction");
+        TestAssert.False(
+            connectEligibility.Contains("GetCurrentReport", StringComparison.Ordinal),
+            "A previous diagnostic still gates whether the connection action can run.");
+
+        string connectMethod = Slice(
+            viewModel,
+            "private async Task ConnectToSelectedHostAsync()",
+            "private async Task DisconnectSelectedHostAsync");
+        string diagnoseMethod = Slice(
+            viewModel,
+            "private async Task DiagnoseSelectedHostAsync()",
+            "private void CancelDiagnostics()");
+        int reportInvalidationIndex = diagnoseMethod.IndexOf("_reports.Remove(profile.Id);", StringComparison.Ordinal);
+        int missingCredentialIndex = diagnoseMethod.IndexOf("profile.CredentialTarget is null", StringComparison.Ordinal);
+        int diagnosticIndex = connectMethod.IndexOf("await DiagnoseSelectedHostAsync();", StringComparison.Ordinal);
+        int reportIndex = connectMethod.IndexOf("GetCurrentReport(profile)", StringComparison.Ordinal);
+        int confirmationIndex = connectMethod.IndexOf("Dialogs.ShowConfirmAsync", StringComparison.Ordinal);
+        int registryIndex = connectMethod.IndexOf("_sessionRegistry.ConnectAsync", StringComparison.Ordinal);
+        TestAssert.True(diagnosticIndex >= 0, "The connection action does not run the diagnostic pipeline.");
+        TestAssert.True(
+            reportInvalidationIndex >= 0 && reportInvalidationIndex < missingCredentialIndex,
+            "A missing explicit credential can return before invalidating the previous diagnostic report.");
+        TestAssert.Contains("SelectedHost?.ResetReport();", diagnoseMethod);
+        TestAssert.True(
+            diagnosticIndex < reportIndex
+            && reportIndex < confirmationIndex
+            && confirmationIndex < registryIndex,
+            "Connection must diagnose, validate the fresh report, confirm, and only then publish a host session.");
+        TestAssert.Contains("IsEnabled=\"{Binding CanDiagnoseSelectedHost}\"", page);
+    }
+
+    private static string Slice(string source, string startMarker, string endMarker)
+    {
+        int start = source.IndexOf(startMarker, StringComparison.Ordinal);
+        int end = source.IndexOf(endMarker, start + startMarker.Length, StringComparison.Ordinal);
+        TestAssert.True(start >= 0 && end > start, $"Could not locate source slice {startMarker}.");
+        return source[start..end];
     }
 
     private static string FindRepositoryRoot()

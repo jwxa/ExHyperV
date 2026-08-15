@@ -50,12 +50,9 @@ public static class HostRepairAdvisor
         HostDiagnosticStepResult management = report.GetStep(HostDiagnosticStepKind.WmiDcom);
         HostDiagnosticStepResult console = report.GetStep(HostDiagnosticStepKind.Tcp2179);
 
-        if (ipv4.Status == HostDiagnosticStepStatus.Failed)
-            return GuidanceForManagement(ipv4.ErrorCode);
         if (identity.Status == HostDiagnosticStepStatus.Failed)
             return GuidanceForManagement(identity.ErrorCode);
-        if (ipv4.Status == HostDiagnosticStepStatus.Cancelled
-            || identity.Status == HostDiagnosticStepStatus.Cancelled)
+        if (identity.Status == HostDiagnosticStepStatus.Cancelled)
             return GuidanceForManagement(HostDiagnosticErrorCode.Cancelled);
 
         if (management.Status == HostDiagnosticStepStatus.Failed
@@ -77,12 +74,21 @@ public static class HostRepairAdvisor
                 string.Empty);
         }
 
+        if (management.Status == HostDiagnosticStepStatus.Succeeded)
+        {
+            if (console.Status == HostDiagnosticStepStatus.Failed)
+                return GuidanceForConsole(console.ErrorCode);
+            return HostRepairDecision.None;
+        }
+
         if (management.Status == HostDiagnosticStepStatus.Failed)
             return GuidanceForManagement(management.ErrorCode);
         if (management.Status is HostDiagnosticStepStatus.Skipped or HostDiagnosticStepStatus.Cancelled)
+        {
+            if (ipv4.Status == HostDiagnosticStepStatus.Failed)
+                return GuidanceForManagement(ipv4.ErrorCode);
             return Guidance("WMI/DCOM 未完成检测，当前不会自动修改；请重新运行连接检测。");
-        if (console.Status == HostDiagnosticStepStatus.Failed)
-            return GuidanceForConsole(console.ErrorCode);
+        }
         return HostRepairDecision.None;
     }
 
