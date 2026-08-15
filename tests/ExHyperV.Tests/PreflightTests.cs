@@ -10,6 +10,7 @@ internal static class PreflightTests
     public static IEnumerable<(string Name, Action Run)> All =>
     [
         ("Preflight_ReadOnlyPipelineReturnsOrderedChineseEvidence", ReadOnlyPipelineReturnsOrderedChineseEvidence),
+        ("Preflight_LogsStreamBeforeReadOnlyReportCompletes", LogsStreamBeforeReadOnlyReportCompletes),
         ("Preflight_PartialReadFailurePreservesOtherFacts", PartialReadFailurePreservesOtherFacts),
         ("Preflight_PartialReadFailureBlocksUnsafePreview", PartialReadFailureBlocksUnsafePreview),
         ("Preflight_WorkgroupLocalAdministratorGetsConditionalMinimumPlan", WorkgroupLocalAdministratorGetsConditionalMinimumPlan),
@@ -26,6 +27,7 @@ internal static class PreflightTests
         ("PreflightViewModel_RejectsMalformedDomainAccount", ViewModelRejectsMalformedDomainAccount),
         ("PreflightViewModel_PublicNetworkChangeRequiresExplicitChoice", ViewModelPublicNetworkChangeRequiresExplicitChoice),
         ("PreflightViewModel_SelectedNetworkAndCidrBuildExpectedPreview", ViewModelSelectedNetworkAndCidrBuildExpectedPreview),
+        ("PreflightViewModel_ApprovedPlanCanExpireWithoutHidingEvidence", ApprovedPlanCanExpireWithoutHidingEvidence),
         ("PreflightViewModel_LateCancelledResultCannotReplaceClearedTarget", ViewModelLateCancelledResultCannotReplaceClearedTarget)
     ];
 
@@ -140,6 +142,40 @@ internal static class PreflightTests
         TestAssert.Contains("工作组 WORKGROUP", log);
         TestAssert.Contains("以太网（接口索引 12）：Public", log);
         TestAssert.Contains("未执行任何修改", log);
+    }
+
+    private static void LogsStreamBeforeReadOnlyReportCompletes()
+    {
+        FakeReadSession session = CompleteSession();
+        session.JoinResult = new TaskCompletionSource<HostJoinSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var streamed = new List<HostPreflightLogEntry>();
+        var pipeline = CreatePipeline(new RecordingReader(session));
+
+        Task<HostPreflightReport> run = pipeline.RunAsync(
+            Profile(),
+            transientCredential: null,
+            streamed.Add,
+            CancellationToken.None);
+        try
+        {
+            TestAssert.True(
+                SpinWait.SpinUntil(() => session.Calls.Contains("join"), TimeSpan.FromSeconds(2)),
+                "Preflight did not reach the blocking read stage.");
+            TestAssert.False(run.IsCompleted, "The read-only report completed before the blocked read was released.");
+            TestAssert.True(streamed.Count >= 3, "Preflight logs were withheld until the complete report.");
+            TestAssert.True(
+                streamed.Zip(streamed.Skip(1), (left, right) => left.Timestamp <= right.Timestamp).All(value => value),
+                "Streamed preflight logs were not ordered by arrival time.");
+            TestAssert.Contains("只读取状态", string.Join('\n', streamed.Select(entry => entry.Message)));
+        }
+        finally
+        {
+            session.JoinResult.TrySetResult(session.Join);
+        }
+
+        HostPreflightReport report = run.GetAwaiter().GetResult();
+        TestAssert.SequenceEqual(report.LogEntries, streamed);
     }
 
     private static void PartialReadFailurePreservesOtherFacts()
@@ -389,6 +425,20 @@ internal static class PreflightTests
             "The selected CIDR was absent from the preview.");
     }
 
+    private static void ApprovedPlanCanExpireWithoutHidingEvidence()
+    {
+        using HostPreflightViewModel viewModel = CreateViewModel();
+        SelectMinimumPreviewInputs(viewModel, makePrivate: true);
+        viewModel.NextStepCommand.Execute(null);
+        int visibleChanges = viewModel.PlannedChanges.Count;
+        TestAssert.True(viewModel.CanApply, "The complete preview was not eligible for confirmation.");
+
+        viewModel.ExpireApprovedPlan();
+
+        TestAssert.False(viewModel.CanApply, "An expired approved plan remained applicable.");
+        TestAssert.Equal(visibleChanges, viewModel.PlannedChanges.Count);
+    }
+
     private static void ViewModelLateCancelledResultCannotReplaceClearedTarget()
     {
         var reader = new DelayedReader();
@@ -506,11 +556,12 @@ internal static class PreflightTests
         public IReadOnlyList<HostNetworkSnapshot> Networks { get; set; } = [];
         public HostFirewallSnapshot Firewall { get; set; } = null!;
         public Exception? FirewallError { get; set; }
+        public TaskCompletionSource<HostJoinSnapshot>? JoinResult { get; set; }
 
         public Task<HostJoinSnapshot> ReadJoinAsync(CancellationToken cancellationToken)
         {
             Calls.Add("join");
-            return Task.FromResult(Join);
+            return JoinResult?.Task ?? Task.FromResult(Join);
         }
 
         public Task<IReadOnlyList<HostLocalAccount>> ReadEnabledLocalAccountsAsync(CancellationToken cancellationToken)

@@ -32,6 +32,8 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
     private readonly Dictionary<Guid, WindowsCredential> _transientCredentials = [];
     private CancellationTokenSource? _switchCancellation;
     private CancellationTokenSource? _configurationCancellation;
+    private HostRepairContext? _repairContext;
+    private bool _isRepairWorkspaceOpen;
     private bool _isDisconnecting;
 
     [ObservableProperty] private ObservableCollection<HostProfileListItemViewModel> _hosts = [];
@@ -83,6 +85,14 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
 
     public bool IsRemoteSelected => SelectedHost?.Profile is not null;
     public bool HasProfiles => Hosts.Count > 1;
+    public bool IsRepairActionVisible =>
+        !_isRepairWorkspaceOpen
+        && !IsDiagnosing
+        && CurrentRepairDecision.CanOfferRepair;
+    public bool IsRepairWorkspaceVisible => _isRepairWorkspaceOpen;
+    public string RepairActionToolTip => CurrentRepairDecision.ActionToolTip;
+    public string RepairGuidance => CurrentRepairDecision.Guidance;
+    public bool HasRepairGuidance => !string.IsNullOrWhiteSpace(RepairGuidance);
     public bool CanConnectToSelectedHost =>
         SelectedHost?.Profile is { } profile
         && !IsSwitching
@@ -220,7 +230,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         InvalidateDiagnosticRun();
         InvalidateConfigurationRun();
         _switchCancellation?.Cancel();
-        Preflight.ClearTarget();
+        CloseRepairWorkspace();
         Logs.SelectHost(value?.Profile is { } selectedProfile
             ? HostId.FromProfile(selectedProfile)
             : HostId.Local);
@@ -229,6 +239,8 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
             ? report
             : null);
     }
+
+    partial void OnIsDiagnosingChanged(bool value) => NotifyRepairStateChanged();
 
     partial void OnIsSwitchingChanged(bool value) => NotifyConnectionEligibilityChanged();
 
@@ -347,6 +359,8 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         }
 
         using HostDiagnosticRun diagnosticRun = _diagnosticRuns.Begin(profile.Id);
+        _reports.Remove(profile.Id);
+        CloseRepairWorkspace();
         IsDiagnosing = true;
         DiagnoseSelectedHostCommand.NotifyCanExecuteChanged();
         DiagnosticSummary = $"正在检测 {profile.DisplayName}...";
@@ -391,11 +405,13 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
     [RelayCommand]
     private void CancelDiagnostics() => _diagnosticRuns.CancelCurrent();
 
-    [RelayCommand(CanExecute = nameof(IsRemoteSelected))]
-    private async Task OpenPreflightAsync()
+    [RelayCommand(CanExecute = nameof(CanOpenRepair))]
+    private async Task OpenRepairAsync()
     {
         HostProfile? profile = SelectedHost?.Profile;
-        if (profile is null) return;
+        HostDiagnosticReport? report = profile is null ? null : GetCurrentReport(profile);
+        if (profile is null || report is null || !HostRepairAdvisor.Evaluate(profile, report).CanOfferRepair)
+            return;
         WindowsCredential? transientCredential = _transientCredentials.GetValueOrDefault(profile.Id);
         if (profile.AuthenticationMode == HostAuthenticationMode.ExplicitCredential
             && profile.CredentialTarget is null
@@ -407,9 +423,14 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
 
         Preflight.Reset();
         Preflight.SetTarget(profile, transientCredential);
+        _repairContext = HostRepairContext.Capture(profile, report);
+        _isRepairWorkspaceOpen = true;
+        NotifyRepairStateChanged();
         SelectedWorkspaceTabIndex = 2;
         await Preflight.RunCommand.ExecuteAsync(null);
     }
+
+    private bool CanOpenRepair() => IsRepairActionVisible;
 
     [RelayCommand]
     private void RetryReconnect()
@@ -441,6 +462,8 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
     {
         HostProfile? profile = SelectedHost?.Profile;
         if (profile is null
+            || _repairContext is null
+            || !_repairContext.Matches(profile, GetCurrentReport(profile))
             || !Preflight.TryGetApprovedConfiguration(out HostPreflightReport? report, out HostPreflightPlan? plan)
             || report is null
             || plan is null)
@@ -452,6 +475,12 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         var confirmation = new HostConfigurationDialogViewModel(profile, plan);
         bool confirmed = await Dialogs.ShowHostConfigurationConfirmationAsync(confirmation);
         if (!confirmed || !HostConfigurationConfirmation.IsExact(confirmation.ConfirmationText)) return;
+        if (_repairContext is null
+            || !_repairContext.Matches(profile, GetCurrentReport(profile)))
+        {
+            ShowTip("主机选择或最新诊断已变化，请重新打开设置检查。" );
+            return;
+        }
 
         InvalidateConfigurationRun();
         var configurationCancellation = new CancellationTokenSource();
@@ -481,6 +510,9 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         if (!isCurrentRun || SelectedHost?.Profile?.Id != profile.Id) return;
 
         Preflight.CompleteApply(result);
+        Preflight.ExpireApprovedPlan();
+        _repairContext = null;
+        NotifyRepairStateChanged();
 
         if (result.Diagnostic is { } diagnostic)
         {
@@ -501,6 +533,15 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         CancellationTokenSource? cancellation = _configurationCancellation;
         _configurationCancellation = null;
         cancellation?.Cancel();
+    }
+
+    private void CloseRepairWorkspace()
+    {
+        _repairContext = null;
+        _isRepairWorkspaceOpen = false;
+        Preflight.ClearTarget();
+        if (SelectedWorkspaceTabIndex == 2) SelectedWorkspaceTabIndex = 0;
+        NotifyRepairStateChanged();
     }
 
     private void InvalidateDiagnosticRun()
@@ -640,6 +681,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
 
     private void ApplyReport(HostDiagnosticReport? report)
     {
+        NotifyRepairStateChanged();
         if (SelectedHost?.Profile is null)
         {
             DiagnosticSummary = "本地宿主已连接；远程诊断不适用于本机。";
@@ -739,8 +781,22 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         EditSelectedHostCommand.NotifyCanExecuteChanged();
         DeleteSelectedHostCommand.NotifyCanExecuteChanged();
         DiagnoseSelectedHostCommand.NotifyCanExecuteChanged();
-        OpenPreflightCommand.NotifyCanExecuteChanged();
+        NotifyRepairStateChanged();
         NotifyConnectionEligibilityChanged();
+    }
+
+    private HostRepairDecision CurrentRepairDecision => SelectedHost?.Profile is { } profile
+        ? HostRepairAdvisor.Evaluate(profile, GetCurrentReport(profile))
+        : HostRepairDecision.None;
+
+    private void NotifyRepairStateChanged()
+    {
+        OnPropertyChanged(nameof(IsRepairActionVisible));
+        OnPropertyChanged(nameof(IsRepairWorkspaceVisible));
+        OnPropertyChanged(nameof(RepairActionToolTip));
+        OnPropertyChanged(nameof(RepairGuidance));
+        OnPropertyChanged(nameof(HasRepairGuidance));
+        OpenRepairCommand.NotifyCanExecuteChanged();
     }
 
     private HostDiagnosticReport? GetCurrentReport(HostProfile profile) =>

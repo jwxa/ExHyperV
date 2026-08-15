@@ -14,9 +14,16 @@ public sealed class HostPreflightPipeline(
 {
     private readonly Func<DateTimeOffset> _clock = clock ?? (() => DateTimeOffset.Now);
 
-    public async Task<HostPreflightReport> RunAsync(
+    public Task<HostPreflightReport> RunAsync(
         HostProfile profile,
         WindowsCredential? transientCredential = null,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(profile, transientCredential, onLogEntry: null, cancellationToken);
+
+    public async Task<HostPreflightReport> RunAsync(
+        HostProfile profile,
+        WindowsCredential? transientCredential,
+        Action<HostPreflightLogEntry>? onLogEntry,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(profile);
@@ -165,7 +172,10 @@ public sealed class HostPreflightPipeline(
 
         void Log(HostPreflightStage stage, HostPreflightLogLevel level, string message, Exception? exception = null)
         {
-            logs.Add(new HostPreflightLogEntry(_clock(), stage, level, message));
+            var entry = new HostPreflightLogEntry(_clock(), stage, level, message);
+            logs.Add(entry);
+            try { onLogEntry?.Invoke(entry); }
+            catch { }
             var context = new AppLogContext(
                 Host: profile.Address,
                 Properties: new Dictionary<string, object?> { ["预检阶段"] = stage.ToString() },

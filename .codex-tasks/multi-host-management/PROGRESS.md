@@ -6,8 +6,8 @@
 - 跟踪规格：[GitHub Issue #14](https://github.com/jwxa/ExHyperV/issues/14)，标签 `ready-for-agent`。
 - 实施 Issues：[#15](https://github.com/jwxa/ExHyperV/issues/15) 至 [#22](https://github.com/jwxa/ExHyperV/issues/22)，均为 OPEN 且带 `ready-for-agent`。
 - 实施状态：进行中。
-- 已完成：[#15 扩展宿主身份与多会话注册表](https://github.com/jwxa/ExHyperV/issues/15)、[#16 本机与首台远程并列管理](https://github.com/jwxa/ExHyperV/issues/16)、[#17 多台远程宿主与隔离操作](https://github.com/jwxa/ExHyperV/issues/17)、[#18 旧数据与每宿主独立自动重连](https://github.com/jwxa/ExHyperV/issues/18)、[#19 安全断开宿主及其控制台](https://github.com/jwxa/ExHyperV/issues/19)、[#20 当前宿主实时脱敏日志](https://github.com/jwxa/ExHyperV/issues/20)。
-- 当前任务：准备开始 [#21 按诊断结果提供设置检查与修复](https://github.com/jwxa/ExHyperV/issues/21)。
+- 已完成：[#15 扩展宿主身份与多会话注册表](https://github.com/jwxa/ExHyperV/issues/15)、[#16 本机与首台远程并列管理](https://github.com/jwxa/ExHyperV/issues/16)、[#17 多台远程宿主与隔离操作](https://github.com/jwxa/ExHyperV/issues/17)、[#18 旧数据与每宿主独立自动重连](https://github.com/jwxa/ExHyperV/issues/18)、[#19 安全断开宿主及其控制台](https://github.com/jwxa/ExHyperV/issues/19)、[#20 当前宿主实时脱敏日志](https://github.com/jwxa/ExHyperV/issues/20)、[#21 按诊断结果提供设置检查与修复](https://github.com/jwxa/ExHyperV/issues/21)。
+- 当前任务：[#22 收缩旧活动宿主模型并完成发布验收](https://github.com/jwxa/ExHyperV/issues/22)。
 - 规格来源：`doc/multi-host-management-spec.md`。
 - 设计来源：`doc/multi-host-management-design.md`。
 
@@ -29,12 +29,14 @@
 - #18 已完成：目标宿主旧数据、写入/控制台门禁和唯一重连任务与其他宿主隔离；立即重试、停止和恢复均按 `HostId` 路由；VM 分组通过现有警告色和 Tooltip 说明旧数据；209/209 测试、Release 构建、UTF-8、凭据模式和差异检查通过。
 - 已建立并完成 #19 的 Full Single 子任务：每宿主写计数驱动断开门控，控制台按宿主和 VM 登记；无窗口直接断开，有窗口确认后只关闭目标窗口，取消和写入竞态均不产生副作用；主动断开只移除目标 VM 分组并保留本机、其他宿主和保存配置；221/221 测试、Release 构建、UTF-8、凭据模式和差异检查通过。
 - 已建立并完成 #20 的 Full Single 子任务：磁盘与实时 Feed 共享同一不可变脱敏条目；诊断、会话、重连、预检、配置和 VM 操作按 `HostId` 发布；日志 Tab 只展示当前选择，默认跟随、向上滚动暂停并支持回到最新；230/230 测试、Release 构建、UTF-8、敏感模式、主题颜色和差异检查通过。
+- 已建立 #21 的 Full Single 子任务；沿用现有配置流水线，新增范围只包含诊断修复判定、当前上下文入口、逐条预检证据和旧诊断拒绝。
+- #21 已完成：修复入口仅由当前宿主的最新可处理诊断显示；预检日志逐条到达，修复上下文绑定配置 ID、IPv4 和诊断时间；Public 网络继续显式选择，非精确中文 `确认` 保持零修改，执行后沿用现有最小权限、回滚和复诊流水线；239/239 测试、Release/WPF 构建、UTF-8、敏感字面量、新增颜色和差异检查通过。
 
 ## 下一步
 
-1. 为 #21 建立诊断上下文、只读预检、修复预览和精确中文确认零副作用的 RED 测试。
-2. 完成 #21 后进入 #22，移除残留的全局活动宿主操作路径并执行发布验收。
-3. 每个任务完成后立即更新 `SUBTASKS.csv` 和本文件，不集中到最后补记。
+1. 为 #22 建立 Full Single 子任务并重读最终收口验收标准。
+2. 移除残留的全局活动宿主操作路径，补齐集成、文档和主题视觉收口。
+3. 执行确定性测试、Release/WPF 构建、受控宿主只读验收及最终静态门禁。
 
 ## 注意事项
 

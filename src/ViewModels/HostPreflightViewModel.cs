@@ -176,10 +176,15 @@ public partial class HostPreflightViewModel(HostPreflightPipeline pipeline) : Ob
         OnPropertyChanged(nameof(HasPlan));
         OnPropertyChanged(nameof(CanApply));
         Findings.Clear();
+        PreflightLogText = string.Empty;
         Summary = $"正在读取 {_profile.DisplayName} 的账户、组、网络、策略与防火墙状态...";
         try
         {
-            HostPreflightReport report = await pipeline.RunAsync(_profile, _transientCredential, cancellation.Token);
+            HostPreflightReport report = await pipeline.RunAsync(
+                _profile,
+                _transientCredential,
+                entry => AppendPreflightLog(cancellation, entry),
+                cancellation.Token);
             if (!ReferenceEquals(_cancellation, cancellation) || cancellation.IsCancellationRequested) return;
             _report = report;
             ApplyReport(report);
@@ -282,6 +287,12 @@ public partial class HostPreflightViewModel(HostPreflightPipeline pipeline) : Ob
         return report is not null && plan is not null && plan.Changes.Count > 0;
     }
 
+    public void ExpireApprovedPlan()
+    {
+        _approvedPlan = null;
+        OnPropertyChanged(nameof(CanApply));
+    }
+
     public void BeginApply()
     {
         IsApplying = true;
@@ -357,6 +368,15 @@ public partial class HostPreflightViewModel(HostPreflightPipeline pipeline) : Ob
                 .Where(item => Ipv4Cidr.IsPrivate(item.Cidr))
                 .GroupBy(item => item.Cidr, StringComparer.OrdinalIgnoreCase)
                 .Select(group => new HostPreflightCidrOptionViewModel(group.Key, string.Join("、", group.Select(item => item.Name).Distinct()))));
+    }
+
+    private void AppendPreflightLog(CancellationTokenSource owner, HostPreflightLogEntry entry)
+    {
+        if (!ReferenceEquals(_cancellation, owner) || owner.IsCancellationRequested) return;
+        string line = $"[{entry.Timestamp:HH:mm:ss.fff}] [{LogLevelText(entry.Level)}] {entry.Message}";
+        PreflightLogText = string.IsNullOrEmpty(PreflightLogText)
+            ? line
+            : PreflightLogText + Environment.NewLine + line;
     }
 
     private static string LogLevelText(HostPreflightLogLevel level) => level switch

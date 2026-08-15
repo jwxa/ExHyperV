@@ -276,9 +276,11 @@
                                 <ui:SymbolIcon Symbol="Pulse24"/>
                             </ui:Button.Icon>
                         </ui:Button>
-                        <ui:Button Command="{Binding OpenPreflightCommand}"
-                                   IsEnabled="{Binding IsRemoteSelected}" Appearance="Secondary" Margin="0,0,8,0">
-                            <ui:Button.Content>配置预检</ui:Button.Content>
+                        <ui:Button Command="{Binding OpenRepairCommand}"
+                                   Visibility="{Binding IsRepairActionVisible, Converter={StaticResource BoolToVis}}"
+                                   Appearance="Secondary" Margin="0,0,8,0"
+                                   ToolTip="{Binding RepairActionToolTip}">
+                            <ui:Button.Content>检查并修复设置</ui:Button.Content>
                             <ui:Button.Icon>
                                 <ui:SymbolIcon Symbol="ShieldTask24"/>
                             </ui:Button.Icon>
@@ -342,6 +344,23 @@
                                         <ui:SymbolIcon Symbol="Info24" FontSize="20" Margin="0,0,10,0"/>
                                         <TextBlock Grid.Column="1" Text="{Binding DiagnosticSummary}" TextWrapping="Wrap"
                                                    VerticalAlignment="Center"/>
+                                    </Grid>
+                                </Border>
+
+                                <Border Background="{ui:ThemeResource ControlFillColorSecondaryBrush}"
+                                        BorderBrush="{Binding ManagementStatusBrush}"
+                                        BorderThickness="3,0,0,0" CornerRadius="4" Padding="12"
+                                        Margin="0,0,0,12"
+                                        Visibility="{Binding HasRepairGuidance, Converter={StaticResource BoolToVis}}">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <ui:SymbolIcon Symbol="Info24" FontSize="18" Margin="0,0,9,0"
+                                                       Foreground="{Binding ManagementStatusBrush}"/>
+                                        <TextBlock Grid.Column="1" Text="{Binding RepairGuidance}"
+                                                   TextWrapping="Wrap" VerticalAlignment="Center"/>
                                     </Grid>
                                 </Border>
 
@@ -527,7 +546,8 @@
                         </Grid>
                     </TabItem>
 
-                    <TabItem Header="配置预检">
+                    <TabItem Header="设置修复"
+                             Visibility="{Binding IsRepairWorkspaceVisible, Converter={StaticResource BoolToVis}}">
                         <Grid Margin="0,14,0,0" DataContext="{Binding Preflight}">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -543,7 +563,7 @@
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <StackPanel>
-                                    <TextBlock Text="远程连接配置预检" FontSize="18" FontWeight="SemiBold"/>
+                                    <TextBlock Text="检查并修复远程设置" FontSize="18" FontWeight="SemiBold"/>
                                     <TextBlock Text="{Binding HostLabel}" Margin="0,3,0,0"
                                                Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"/>
                                 </StackPanel>

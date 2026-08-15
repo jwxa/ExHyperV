@@ -42,6 +42,7 @@ tests.AddRange(ConsoleSessionTests.All);
 tests.AddRange(HostConsoleRegistryTests.All);
 tests.AddRange(HostLogFeedTests.All);
 tests.AddRange(HostLogViewModelTests.All);
+tests.AddRange(HostRepairRecommendationTests.All);
 tests.AddRange(ReconnectTests.All);
 tests.AddRange(CapabilityTests.All);
 tests.AddRange(PreflightTests.All);
