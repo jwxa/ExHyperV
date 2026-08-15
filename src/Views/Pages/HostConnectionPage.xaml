@@ -284,17 +284,16 @@
                             </ui:Button.Icon>
                         </ui:Button>
                         <ui:Button Command="{Binding ConnectToSelectedHostCommand}"
-                                   IsEnabled="{Binding CanConnectToSelectedHost}" Appearance="Primary"
-                                   ToolTip="{Binding ConnectHint}" ToolTipService.ShowOnDisabled="True">
+                                   IsEnabled="{Binding CanExecuteConnectionAction}"
+                                   Appearance="{Binding ConnectionActionAppearance}"
+                                   Foreground="White"
+                                   ToolTip="{Binding ConnectionActionToolTip}" ToolTipService.ShowOnDisabled="True">
                             <StackPanel Orientation="Horizontal">
                                 <ui:ProgressRing Width="16" Height="16" IsIndeterminate="True" Margin="0,0,7,0"
                                                  Visibility="{Binding IsSwitching, Converter={StaticResource BoolToVis}}"/>
                                 <ui:SymbolIcon Symbol="PlugConnected24" Margin="0,0,7,0"
                                                Visibility="{Binding IsSwitching, Converter={StaticResource BoolToVis}, ConverterParameter=Invert}"/>
-                                <TextBlock Text="连接到此主机"
-                                           Visibility="{Binding IsSwitching, Converter={StaticResource BoolToVis}, ConverterParameter=Invert}"/>
-                                <TextBlock Text="正在连接"
-                                           Visibility="{Binding IsSwitching, Converter={StaticResource BoolToVis}}"/>
+                                <TextBlock Text="{Binding ConnectionActionText}"/>
                             </StackPanel>
                         </ui:Button>
                     </StackPanel>

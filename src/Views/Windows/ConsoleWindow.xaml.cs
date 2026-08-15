@@ -19,7 +19,7 @@ namespace ExHyperV.Views
     /// 最大化("窗口全屏"，工作区) / 全屏(WindowStyle=None + 最大化铺满显示器、WM_NCHITTEST 屏蔽缩放边、关 Mica + 去 DWM 边框消白边)。
     /// 连接随 VM 运行状态走（复用 ViewModel 的状态轮询，断线/VM 重启自动重连，无额外定时器）。
     /// </summary>
-    public partial class ConsoleWindow : FluentWindow
+    public partial class ConsoleWindow : FluentWindow, IHostConsoleWindow
     {
         private const double TitleBarHeight = 42;   // 与 XAML ui:TitleBar 高度一致
         // 全屏热键 Ctrl+Alt+Enter，交给 mstscax 自带的 HotKeyFullScreen(此 vk 传给 FullScreenHotKeyVirtualKey)。
@@ -220,6 +220,12 @@ namespace ExHyperV.Views
                 _closing = true;
                 Close();
             }));
+        }
+
+        void IHostConsoleWindow.Activate()
+        {
+            if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+            Activate();
         }
 
         private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)

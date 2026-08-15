@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Windows;
 using ExHyperV.Views;
 using ExHyperV.Services.Remote.Consoles;
@@ -19,25 +18,25 @@ namespace ExHyperV.Interaction
                 mw.RootNavigation.Navigate(pageType);
         }
 
-        // 每个 VM 至多一个控制台窗口，按 vmId(GUID) 记账（issue #245）。仅 UI 线程访问，无需加锁。
-        private static readonly Dictionary<string, ConsoleWindow> _consoles = new();
-
         /// <summary>打开虚拟机沉浸式控制台窗口；若该 VM 已有窗口则前置，不新开。</summary>
         public static void OpenConsoleWindow(ActiveHostConsoleSession session)
         {
             ArgumentNullException.ThrowIfNull(session);
-            if (_consoles.TryGetValue(session.WindowKey, out var existing))
-            {
-                if (existing.WindowState == WindowState.Minimized)
-                    existing.WindowState = WindowState.Normal;
-                existing.Activate();
-                return;
-            }
+            IHostConsoleRegistry registry = ActiveHostConsoleWindows.Registry;
+            if (registry.TryActivate(session.WindowKey)) return;
 
             var window = new ConsoleWindow(session);
-            _consoles[session.WindowKey] = window;
-            window.Closed += (_, _) => _consoles.Remove(session.WindowKey);
-            window.Show();
+            registry.Register(session, window);
+            window.Closed += (_, _) => registry.Unregister(session.WindowKey, window);
+            try
+            {
+                window.Show();
+            }
+            catch
+            {
+                registry.Unregister(session.WindowKey, window);
+                throw;
+            }
         }
     }
 }

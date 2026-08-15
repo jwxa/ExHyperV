@@ -9,7 +9,14 @@ public sealed record ActiveHostConsoleSession(
     string VmName,
     string Server,
     int Port,
-    string WindowKey);
+    string WindowKey)
+{
+    public HostId HostId => Stamp.ProfileId is { } profileId
+        ? HostId.FromProfileId(profileId)
+        : HostId.Local;
+
+    public VmKey VmKey => new(HostId, VmId);
+}
 
 public sealed record HostConsoleSessionCapture(
     ActiveHostConsoleSession? Session,

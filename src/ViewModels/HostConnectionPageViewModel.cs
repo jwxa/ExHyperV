@@ -9,6 +9,7 @@ using ExHyperV.Services;
 using ExHyperV.Services.Logging;
 using ExHyperV.Services.Remote.Credentials;
 using ExHyperV.Services.Remote.Configuration;
+using ExHyperV.Services.Remote.Consoles;
 using ExHyperV.Services.Remote.Diagnostics;
 using ExHyperV.Services.Remote.Preflight;
 using ExHyperV.Services.Remote.Profiles;
@@ -22,6 +23,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
 {
     private readonly HostProfileManager _profileManager;
     private readonly IHostSessionRegistry _sessionRegistry;
+    private readonly HostDisconnectCoordinator _disconnectCoordinator;
     private readonly HostDiagnosticPipeline _diagnosticPipeline;
     private readonly HostConfigurationPipeline _configurationPipeline;
     private readonly ISupportArtifactLocator _supportArtifactLocator;
@@ -30,6 +32,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
     private readonly Dictionary<Guid, WindowsCredential> _transientCredentials = [];
     private CancellationTokenSource? _switchCancellation;
     private CancellationTokenSource? _configurationCancellation;
+    private bool _isDisconnecting;
 
     [ObservableProperty] private ObservableCollection<HostProfileListItemViewModel> _hosts = [];
     [ObservableProperty] private HostProfileListItemViewModel? _selectedHost;
@@ -58,10 +61,14 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         HostDiagnosticPipeline diagnosticPipeline,
         HostPreflightPipeline preflightPipeline,
         HostConfigurationPipeline configurationPipeline,
-        ISupportArtifactLocator supportArtifactLocator)
+        ISupportArtifactLocator supportArtifactLocator,
+        IHostConsoleRegistry? consoleRegistry = null)
     {
         _profileManager = profileManager;
         _sessionRegistry = sessionRegistry ?? throw new ArgumentNullException(nameof(sessionRegistry));
+        _disconnectCoordinator = new HostDisconnectCoordinator(
+            _sessionRegistry,
+            consoleRegistry ?? ActiveHostConsoleWindows.Registry);
         _diagnosticPipeline = diagnosticPipeline;
         _configurationPipeline = configurationPipeline;
         _supportArtifactLocator = supportArtifactLocator ?? throw new ArgumentNullException(nameof(supportArtifactLocator));
@@ -78,6 +85,46 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         && !IsSwitching
         && !IsConnected(profile)
         && GetCurrentReport(profile)?.ManagementAvailable == true;
+    public bool CanExecuteConnectionAction
+    {
+        get
+        {
+            if (SelectedHost?.Profile is not { } profile || IsSwitching) return false;
+            return IsConnected(profile)
+                ? _sessionRegistry.GetDisconnectAvailability(HostId.FromProfile(profile)).CanDisconnect
+                : CanConnectToSelectedHost;
+        }
+    }
+    public string ConnectionActionText
+    {
+        get
+        {
+            if (IsSwitching && !_isDisconnecting) return "正在连接";
+            return SelectedHost?.Profile is { } profile && IsConnected(profile)
+                ? "断开"
+                : "连接到此主机";
+        }
+    }
+    public ControlAppearance ConnectionActionAppearance =>
+        SelectedHost?.Profile is { } profile && IsConnected(profile)
+            ? ControlAppearance.Danger
+            : ControlAppearance.Primary;
+    public string ConnectionActionToolTip
+    {
+        get
+        {
+            if (IsSwitching)
+                return _isDisconnecting ? "正在断开远程宿主" : "正在准备并验证宿主快照";
+            if (SelectedHost?.Profile is not { } profile) return "选择远程主机后可连接";
+            if (!IsConnected(profile)) return ConnectHint;
+
+            HostDisconnectAvailability availability =
+                _sessionRegistry.GetDisconnectAvailability(HostId.FromProfile(profile));
+            return availability.CanDisconnect
+                ? "断开该宿主；保存的主机配置将继续保留。"
+                : availability.Reason;
+        }
+    }
     public string SelectedDisplayName => SelectedHost?.DisplayName ?? "未选择主机";
     public string SelectedAddress => SelectedHost?.Address ?? string.Empty;
     public string SelectedIdentity => SelectedHost?.Profile?.AuthenticationMode switch
@@ -446,10 +493,16 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         NotifyConnectionEligibilityChanged();
     }
 
-    [RelayCommand(CanExecute = nameof(CanConnectToSelectedHost))]
+    [RelayCommand(CanExecute = nameof(CanExecuteConnectionAction))]
     private async Task ConnectToSelectedHostAsync()
     {
         HostProfile? profile = SelectedHost?.Profile;
+        if (profile is not null && IsConnected(profile))
+        {
+            await DisconnectSelectedHostAsync(profile);
+            return;
+        }
+
         HostDiagnosticReport? report = profile is null ? null : GetCurrentReport(profile);
         if (profile is null || report?.ManagementAvailable != true)
         {
@@ -486,6 +539,42 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         }
         finally
         {
+            IsSwitching = false;
+            UpdateActiveHostProperties();
+        }
+    }
+
+    private async Task DisconnectSelectedHostAsync(HostProfile profile)
+    {
+        _switchCancellation?.Cancel();
+        _switchCancellation?.Dispose();
+        _switchCancellation = new CancellationTokenSource();
+        _isDisconnecting = true;
+        IsSwitching = true;
+        try
+        {
+            HostDisconnectWorkflowResult result = await _disconnectCoordinator.DisconnectAsync(
+                HostId.FromProfile(profile),
+                profile.DisplayName,
+                (prompt, _) => Dialogs.ShowConfirmAsync(
+                    "断开远程宿主",
+                    prompt.Message,
+                    "断开",
+                    "取消",
+                    isDanger: true,
+                    showIcon: true,
+                    maxWidth: 440),
+                _switchCancellation.Token);
+            if (result.Succeeded) ShowSuccess(result.Message);
+            else if (!result.Cancelled) ShowError(result.Message);
+        }
+        catch (OperationCanceledException)
+        {
+            // Selection changes cancel the pending action without changing host state.
+        }
+        finally
+        {
+            _isDisconnecting = false;
             IsSwitching = false;
             UpdateActiveHostProperties();
         }
@@ -659,7 +748,11 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
     private void NotifyConnectionEligibilityChanged()
     {
         OnPropertyChanged(nameof(CanConnectToSelectedHost));
+        OnPropertyChanged(nameof(CanExecuteConnectionAction));
         OnPropertyChanged(nameof(ConnectHint));
+        OnPropertyChanged(nameof(ConnectionActionText));
+        OnPropertyChanged(nameof(ConnectionActionAppearance));
+        OnPropertyChanged(nameof(ConnectionActionToolTip));
         ConnectToSelectedHostCommand.NotifyCanExecuteChanged();
     }
 

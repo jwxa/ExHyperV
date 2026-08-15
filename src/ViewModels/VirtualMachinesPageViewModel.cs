@@ -183,7 +183,15 @@ namespace ExHyperV.ViewModels
             void ApplyChange()
             {
                 if (!change.Current.TryGet(change.ChangedHostId, out HostSessionSnapshot? session) || session is null)
+                {
+                    RemoveDisconnectedHostGroup(change.ChangedHostId);
                     return;
+                }
+
+                bool onlyWriteCountChanged =
+                    change.Previous.TryGet(change.ChangedHostId, out HostSessionSnapshot? previousSession)
+                    && previousSession is not null
+                    && previousSession with { ActiveWriteCount = session.ActiveWriteCount } == session;
 
                 HostVmGroupViewModel? group = HostGroups.FirstOrDefault(candidate => candidate.HostId == session.HostId);
                 if (group is null)
@@ -196,7 +204,7 @@ namespace ExHyperV.ViewModels
                 }
 
                 if (SelectedVm?.HostId == group.HostId) ApplySelectedHost(group);
-                if (group.Capabilities[HostCapabilityKind.VmRead].CanExecute)
+                if (!onlyWriteCountChanged && group.Capabilities[HostCapabilityKind.VmRead].CanExecute)
                     _ = LoadHostGroupAsync(group, showErrors: false);
                 StartMonitoring();
             }
@@ -204,6 +212,19 @@ namespace ExHyperV.ViewModels
             Dispatcher? dispatcher = Application.Current?.Dispatcher;
             if (dispatcher is null || dispatcher.CheckAccess()) ApplyChange();
             else dispatcher.Invoke(ApplyChange);
+        }
+
+        private void RemoveDisconnectedHostGroup(HostId hostId)
+        {
+            if (hostId.IsLocal) return;
+            HostVmGroupViewModel? group = HostGroups.FirstOrDefault(candidate => candidate.HostId == hostId);
+            if (group is null) return;
+
+            group.Dispose();
+            HostGroups.Remove(group);
+            _remoteMonitorTasks.Remove(hostId);
+            RebuildVmList();
+            ApplySelectedHost(SelectedVm?.HostGroup ?? HostGroups.First(group => group.IsLocal));
         }
 
         private HostVmGroupViewModel EnsureHostGroup(HostSessionSnapshot session)

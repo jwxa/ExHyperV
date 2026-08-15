@@ -136,6 +136,15 @@ internal static class HostSessionRegistryTests
 
         TestAssert.Contains("IHostSessionRegistry _sessionRegistry", viewModel);
         TestAssert.Contains("_sessionRegistry.ConnectAsync", viewModel);
+        TestAssert.Contains("_disconnectCoordinator.DisconnectAsync", viewModel);
+        TestAssert.Contains("GetDisconnectAvailability", viewModel);
+        TestAssert.Contains("ConnectionActionText", viewModel);
+        TestAssert.Contains("\"连接到此主机\"", viewModel);
+        TestAssert.Contains("\"正在连接\"", viewModel);
+        TestAssert.Contains("\"断开\"", viewModel);
+        TestAssert.Contains("IsEnabled=\"{Binding CanExecuteConnectionAction}\"", page);
+        TestAssert.Contains("ToolTip=\"{Binding ConnectionActionToolTip}\"", page);
+        TestAssert.Contains("Text=\"{Binding ConnectionActionText}\"", page);
         TestAssert.False(viewModel.Contains("SwitchToSelectedAsync(", StringComparison.Ordinal),
             "The host connection page still switches a global active host.");
         TestAssert.False(viewModel.Contains("SwitchToLocalAsync(", StringComparison.Ordinal),

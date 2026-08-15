@@ -26,6 +26,11 @@ public interface IHostSessionRegistry : IHostOperationSessionSource
         HostChannelState managementChannel,
         HostChannelState consoleChannel,
         string? managementFailureReason = null);
+    HostDisconnectAvailability GetDisconnectAvailability(HostId hostId);
+    bool TryPrepareDisconnect(
+        HostId hostId,
+        out IHostDisconnectPreparation? preparation,
+        out string reason);
     void Shutdown();
 }
 
@@ -98,6 +103,34 @@ public sealed record HostConnectResult(
     public bool Succeeded => Status == HostConnectStatus.Succeeded;
 }
 
+public sealed record HostDisconnectAvailability(
+    bool CanDisconnect,
+    int ActiveWriteCount,
+    string Reason);
+
+public enum HostDisconnectStatus
+{
+    Succeeded,
+    NotConnected,
+    Shutdown,
+    InvalidPreparation
+}
+
+public sealed record HostDisconnectResult(
+    HostDisconnectStatus Status,
+    string Message,
+    HostId HostId,
+    HostRegistrySnapshot Snapshot)
+{
+    public bool Succeeded => Status == HostDisconnectStatus.Succeeded;
+}
+
+public interface IHostDisconnectPreparation : IDisposable
+{
+    HostId HostId { get; }
+    HostDisconnectResult Commit();
+}
+
 public sealed record HostSessionSnapshot(
     HostId HostId,
     long Generation,
@@ -109,6 +142,7 @@ public sealed record HostSessionSnapshot(
 {
     public HostBasicSnapshot? BasicSnapshot { get; init; }
     public HostReconnectState Reconnect { get; init; } = HostReconnectState.None;
+    public int ActiveWriteCount { get; init; }
     public HostCapabilityMatrix Capabilities { get; init; } =
         HostCapabilityMatrix.Create(ActiveHostSession.CreateLocal(), isSwitching: false);
 

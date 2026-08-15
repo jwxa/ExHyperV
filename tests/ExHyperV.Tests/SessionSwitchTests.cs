@@ -322,7 +322,7 @@ internal static class SessionSwitchTests
         TestAssert.Contains("Glyph=\"{Binding StatusIconGlyph}\"", page);
         TestAssert.Contains("Visibility=\"{Binding StatusUsesDot, Converter={StaticResource BoolToVis}}\"", page);
         TestAssert.Contains("Visibility=\"{Binding ManagementStatusUsesDot, Converter={StaticResource BoolToVis}}\"", page);
-        TestAssert.Contains("ToolTip=\"{Binding ConnectHint}\"", page);
+        TestAssert.Contains("ToolTip=\"{Binding ConnectionActionToolTip}\"", page);
         TestAssert.False(page.Contains("Text=\"{Binding ConnectHint}\"", StringComparison.Ordinal), "The connection hint still changes the action-row height.");
         TestAssert.Contains("SystemFillColorSuccessBrush", brushes);
         TestAssert.Contains("SystemFillColorCautionBrush", brushes);

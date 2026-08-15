@@ -8,7 +8,8 @@ internal static class VirtualMachinesMultiHostWiringTests
         ("VmPage_XamlGroupsRowsByHost", XamlGroupsRowsByHost),
         ("VmPage_ProjectsEveryConnectedHostInRegistryOrder", ProjectsEveryConnectedHostInRegistryOrder),
         ("VmPage_RemoteGroupsRefreshIndependently", RemoteGroupsRefreshIndependently),
-        ("VmPage_SelectionScopeCarriesOneHostId", SelectionScopeCarriesOneHostId)
+        ("VmPage_SelectionScopeCarriesOneHostId", SelectionScopeCarriesOneHostId),
+        ("VmPage_DisconnectRemovesOnlyTargetRemoteGroup", DisconnectRemovesOnlyTargetRemoteGroup)
     ];
 
     private static void ExposesLocalFirstHostGroups()
@@ -70,6 +71,7 @@ internal static class VirtualMachinesMultiHostWiringTests
         TestAssert.Contains("Task.WhenAll(", source);
         TestAssert.Contains("MonitorRemoteStateLoop(HostVmGroupViewModel group,", source);
         TestAssert.Contains("StartRemoteMonitoring(group)", source);
+        TestAssert.Contains("onlyWriteCountChanged", source);
         TestAssert.False(
             source.Contains("FirstOrDefault(candidate => !candidate.IsLocal)", StringComparison.Ordinal),
             "Remote monitoring still selects one shared remote group per iteration.");
@@ -85,6 +87,19 @@ internal static class VirtualMachinesMultiHostWiringTests
         TestAssert.Contains("public void UpdateSelection(HostId hostId,", viewModel);
         TestAssert.Contains("vm.HostId != hostId", viewModel);
         TestAssert.Contains("targets.Any(vm => vm.HostId != hostId)", viewModel);
+    }
+
+    private static void DisconnectRemovesOnlyTargetRemoteGroup()
+    {
+        string source = ReadSource("ViewModels", "VirtualMachinesPageViewModel.cs");
+
+        TestAssert.Contains("RemoveDisconnectedHostGroup(change.ChangedHostId)", source);
+        TestAssert.Contains("if (hostId.IsLocal) return;", source);
+        TestAssert.Contains("group.Dispose();", source);
+        TestAssert.Contains("HostGroups.Remove(group);", source);
+        TestAssert.Contains("_remoteMonitorTasks.Remove(hostId);", source);
+        TestAssert.Contains("RebuildVmList();", source);
+        TestAssert.Contains("HostGroups.First(group => group.IsLocal)", source);
     }
 
     private static string ReadSource(params string[] segments) =>
