@@ -2,6 +2,7 @@ using System.Diagnostics;
 using ExHyperV.Services.Logging;
 using ExHyperV.Services.Remote.Credentials;
 using ExHyperV.Services.Remote.Profiles;
+using ExHyperV.Services.Remote.Sessions;
 
 namespace ExHyperV.Services.Remote.Diagnostics;
 
@@ -22,6 +23,7 @@ public sealed class HostDiagnosticPipeline(
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(profile);
+        HostId hostId = HostId.FromProfile(profile);
         DateTimeOffset startedAt = _clock();
         var totalStopwatch = Stopwatch.StartNew();
         var steps = new List<HostDiagnosticStepResult>(4);
@@ -128,7 +130,13 @@ public sealed class HostDiagnosticPipeline(
                         ExplicitCredentialValidationStatus.Invalid => HostDiagnosticLogLevel.Error,
                         _ => HostDiagnosticLogLevel.Warning
                     };
-                    Log(kind, validationLevel, credentialValidation.Explanation);
+                    Log(
+                        kind,
+                        validationLevel,
+                        credentialValidation.Explanation,
+                        errorCode: credentialValidation.Status == ExplicitCredentialValidationStatus.Invalid
+                            ? HostDiagnosticErrorCode.InvalidCredential
+                            : HostDiagnosticErrorCode.None);
                     if (credentialValidation.Status == ExplicitCredentialValidationStatus.Invalid)
                     {
                         identity = null;
@@ -150,19 +158,28 @@ public sealed class HostDiagnosticPipeline(
             catch (OperationCanceledException)
             {
                 const string explanation = "身份解析已取消。";
-                Log(kind, HostDiagnosticLogLevel.Warning, explanation);
+                Log(
+                    kind,
+                    HostDiagnosticLogLevel.Warning,
+                    explanation,
+                    errorCode: HostDiagnosticErrorCode.Cancelled);
                 return new(kind, HostDiagnosticStepStatus.Cancelled, stopwatch.Elapsed, explanation, HostDiagnosticErrorCode.Cancelled);
             }
             catch (HostDiagnosticException ex)
             {
                 string explanation = SensitiveDataRedactor.Redact(ex.Message);
-                Log(kind, HostDiagnosticLogLevel.Error, explanation, ex);
+                Log(kind, HostDiagnosticLogLevel.Error, explanation, ex, ex.ErrorCode);
                 return new(kind, HostDiagnosticStepStatus.Failed, stopwatch.Elapsed, explanation, ex.ErrorCode);
             }
             catch (Exception ex)
             {
                 const string explanation = "解析连接身份时发生未预期错误。";
-                Log(kind, HostDiagnosticLogLevel.Error, explanation, ex);
+                Log(
+                    kind,
+                    HostDiagnosticLogLevel.Error,
+                    explanation,
+                    ex,
+                    HostDiagnosticErrorCode.Unexpected);
                 return new(kind, HostDiagnosticStepStatus.Failed, stopwatch.Elapsed, explanation, HostDiagnosticErrorCode.Unexpected);
             }
         }
@@ -218,19 +235,28 @@ public sealed class HostDiagnosticPipeline(
             catch (OperationCanceledException)
             {
                 string explanation = $"{StepName(kind)}检测已取消。";
-                Log(kind, HostDiagnosticLogLevel.Warning, explanation);
+                Log(
+                    kind,
+                    HostDiagnosticLogLevel.Warning,
+                    explanation,
+                    errorCode: HostDiagnosticErrorCode.Cancelled);
                 return new(kind, HostDiagnosticStepStatus.Cancelled, stopwatch.Elapsed, explanation, HostDiagnosticErrorCode.Cancelled);
             }
             catch (HostDiagnosticException ex)
             {
                 string explanation = SensitiveDataRedactor.Redact(ex.Message);
-                Log(kind, HostDiagnosticLogLevel.Error, explanation, ex);
+                Log(kind, HostDiagnosticLogLevel.Error, explanation, ex, ex.ErrorCode);
                 return new(kind, HostDiagnosticStepStatus.Failed, stopwatch.Elapsed, explanation, ex.ErrorCode);
             }
             catch (Exception ex)
             {
                 string explanation = $"{StepName(kind)}检测发生未预期错误。";
-                Log(kind, HostDiagnosticLogLevel.Error, explanation, ex);
+                Log(
+                    kind,
+                    HostDiagnosticLogLevel.Error,
+                    explanation,
+                    ex,
+                    HostDiagnosticErrorCode.Unexpected);
                 return new(kind, HostDiagnosticStepStatus.Failed, stopwatch.Elapsed, explanation, HostDiagnosticErrorCode.Unexpected);
             }
         }
@@ -245,12 +271,17 @@ public sealed class HostDiagnosticPipeline(
             HostDiagnosticStepKind? step,
             HostDiagnosticLogLevel level,
             string message,
-            Exception? exception = null)
+            Exception? exception = null,
+            HostDiagnosticErrorCode errorCode = HostDiagnosticErrorCode.None)
         {
             logs.Add(new HostDiagnosticLogEntry(_clock(), step, level, message));
-            var context = new AppLogContext(profile.Address, Properties: step is null
-                ? null
-                : new Dictionary<string, object?> { ["诊断步骤"] = step.ToString() });
+            var context = new AppLogContext(
+                Host: profile.Address,
+                Properties: step is null
+                    ? null
+                    : new Dictionary<string, object?> { ["诊断步骤"] = step.ToString() },
+                HostId: hostId,
+                ErrorCategory: errorCode.ToString());
             switch (level)
             {
                 case HostDiagnosticLogLevel.Information:

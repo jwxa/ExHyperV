@@ -19,15 +19,15 @@ public static partial class SensitiveDataRedactor
 
         string redacted = AuthorizationHeaderRegex().Replace(
             value,
-            match => $"{match.Groups["prefix"].Value}{RedactedValue}");
+            RedactedValue);
 
         redacted = JsonSecretRegex().Replace(
             redacted,
-            match => $"\"{match.Groups["key"].Value}\":\"{RedactedValue}\"");
+            $"\"{RedactedValue}\":\"{RedactedValue}\"");
 
         redacted = KeyValueSecretRegex().Replace(
             redacted,
-            match => $"{match.Groups["key"].Value}{match.Groups["separator"].Value}{RedactedValue}");
+            match => $"{RedactedValue}{match.Groups["separator"].Value}{RedactedValue}");
 
         return redacted;
     }

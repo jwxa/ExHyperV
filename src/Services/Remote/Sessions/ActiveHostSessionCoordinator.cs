@@ -107,7 +107,7 @@ public sealed class ActiveHostSessionCoordinator : IActiveHostSessionCoordinator
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            AppLog.Information("宿主切换", $"开始准备远程宿主 {profile.DisplayName}。", new AppLogContext(profile.Address, originalGeneration));
+            AppLog.Information("宿主切换", $"开始准备远程宿主 {profile.DisplayName}。", CreateLogContext(profile, originalGeneration));
             candidate = await _connector.ConnectAsync(request with { Profile = profile }, cancellationToken);
             ValidateCandidate(profile, candidate);
             HostBasicSnapshot snapshot = await _snapshotLoader.LoadAsync(candidate, cancellationToken);
@@ -155,17 +155,17 @@ public sealed class ActiveHostSessionCoordinator : IActiveHostSessionCoordinator
 
             Publish(change);
             if (previousCandidate is not null) await DisposeCandidateAsync(previousCandidate);
-            AppLog.Information("宿主切换", $"远程宿主 {profile.DisplayName} 已原子激活。", new AppLogContext(profile.Address, originalGeneration + 1));
+            AppLog.Information("宿主切换", $"远程宿主 {profile.DisplayName} 已原子激活。", CreateLogContext(profile, originalGeneration + 1));
             return new HostSwitchResult(HostSwitchStatus.Succeeded, "活动宿主切换成功。", Current);
         }
         catch (OperationCanceledException)
         {
-            AppLog.Warning("宿主切换", $"切换到 {profile.DisplayName} 已取消。", new AppLogContext(profile.Address, originalGeneration));
+            AppLog.Warning("宿主切换", $"切换到 {profile.DisplayName} 已取消。", CreateLogContext(profile, originalGeneration, "Cancelled"));
             return Result(HostSwitchStatus.Cancelled, "宿主切换已取消，原活动宿主保持不变。");
         }
         catch (Exception ex)
         {
-            AppLog.Error("宿主切换", $"切换到 {profile.DisplayName} 失败，原活动宿主保持不变。", new AppLogContext(profile.Address, originalGeneration), ex);
+            AppLog.Error("宿主切换", $"切换到 {profile.DisplayName} 失败，原活动宿主保持不变。", CreateLogContext(profile, originalGeneration, "ConnectionFailed"), ex);
             return Result(HostSwitchStatus.Failed, $"宿主切换失败：{SensitiveDataRedactor.Redact(ex.Message)}");
         }
         finally
@@ -478,7 +478,7 @@ public sealed class ActiveHostSessionCoordinator : IActiveHostSessionCoordinator
         AppLog.Warning(
             "自动重连",
             $"远程宿主连接中断，开始自动重连：{reason.Trim()}",
-            new AppLogContext(request.Profile.Address, stamp.Generation));
+            CreateLogContext(request.Profile, stamp.Generation, "ConnectionLost"));
         StartReconnectLoop(request, stamp, cancellation);
         return true;
     }
@@ -705,7 +705,7 @@ public sealed class ActiveHostSessionCoordinator : IActiveHostSessionCoordinator
                 AppLog.Information(
                     "自动重连",
                     $"开始第 {attempt} 次重连 {request.Profile.DisplayName}。",
-                    new AppLogContext(request.Profile.Address, lostStamp.Generation));
+                    CreateLogContext(request.Profile, lostStamp.Generation));
                 candidate = await _connector.ConnectAsync(request, owner.Token);
                 ValidateCandidate(request.Profile, candidate);
                 HostBasicSnapshot snapshot = await _snapshotLoader.LoadAsync(candidate, owner.Token);
@@ -749,7 +749,7 @@ public sealed class ActiveHostSessionCoordinator : IActiveHostSessionCoordinator
                 AppLog.Information(
                     "自动重连",
                     $"远程宿主 {request.Profile.DisplayName} 重连成功。",
-                    new AppLogContext(request.Profile.Address, lostStamp.Generation + 1));
+                    CreateLogContext(request.Profile, lostStamp.Generation + 1));
                 return;
             }
             catch (OperationCanceledException) when (owner.IsCancellationRequested)
@@ -785,7 +785,7 @@ public sealed class ActiveHostSessionCoordinator : IActiveHostSessionCoordinator
                 AppLog.Warning(
                     "自动重连",
                     $"第 {attempt} 次重连失败，{delay.TotalSeconds:F0} 秒后重试。",
-                    new AppLogContext(request.Profile.Address, lostStamp.Generation),
+                    CreateLogContext(request.Profile, lostStamp.Generation, "ReconnectFailed"),
                     ex);
 
                 try
@@ -943,6 +943,15 @@ public sealed class ActiveHostSessionCoordinator : IActiveHostSessionCoordinator
             catch { }
         }
     }
+
+    private static AppLogContext CreateLogContext(
+        HostProfile profile,
+        long? generation,
+        string? errorCategory = null) => new(
+            Host: profile.Address,
+            SessionGeneration: generation,
+            HostId: HostId.FromProfile(profile),
+            ErrorCategory: errorCategory);
 
     private static async Task DisposeCandidateAsync(IHostSessionCandidate candidate)
     {

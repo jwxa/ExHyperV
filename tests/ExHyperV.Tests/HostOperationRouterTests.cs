@@ -1,3 +1,4 @@
+using ExHyperV.Services.Logging;
 using ExHyperV.Services.Remote.Profiles;
 using ExHyperV.Services.Remote.Sessions;
 using ExHyperV.Services.Remote.Vms;
@@ -9,7 +10,8 @@ internal static class HostOperationRouterTests
     [
         ("HostRouter_ReadsUseExplicitLocalOrRemoteHostId", ReadsUseExplicitLocalOrRemoteHostId),
         ("HostRouter_WritesAndStaleResultsAreScopedToTargetHost", WritesAndStaleResultsAreScopedToTargetHost),
-        ("HostRouter_TwoRemoteHostsKeepWritesAndGenerationsIndependent", TwoRemoteHostsKeepWritesAndGenerationsIndependent)
+        ("HostRouter_TwoRemoteHostsKeepWritesAndGenerationsIndependent", TwoRemoteHostsKeepWritesAndGenerationsIndependent),
+        ("HostRouter_SessionReconnectAndVmLogsUseOwningHost", SessionReconnectAndVmLogsUseOwningHost)
     ];
 
     private static void ReadsUseExplicitLocalOrRemoteHostId()
@@ -204,6 +206,58 @@ internal static class HostOperationRouterTests
         {
             releaseA.TrySetResult();
             registry.Shutdown();
+        }
+    }
+
+    private static void SessionReconnectAndVmLogsUseOwningHost()
+    {
+        using var temp = new TempDirectory();
+        AppLog.Initialize(temp.Path);
+        var registry = new HostSessionRegistry(
+            new RouterConnector(),
+            new RouterSnapshotLoader(),
+            new BlockingReconnectScheduler());
+        IHostOperationRouter router = new HostOperationRouter(registry, new HostWmiContextResolver());
+        var profile = new HostProfile(
+            Guid.Parse("99999999-9999-9999-9999-999999999993"),
+            "日志测试宿主",
+            "10.0.0.23");
+        HostId hostId = HostId.FromProfile(profile);
+
+        try
+        {
+            HostConnectResult connected = registry.ConnectAsync(new HostConnectRequest(
+                profile,
+                HostChannelState.Available,
+                HostChannelState.Available)).GetAwaiter().GetResult();
+            TestAssert.True(connected.Succeeded, connected.Message);
+
+            HostVmWriteResult write = router.WriteAsync(
+                hostId,
+                (_, _) => Task.FromResult(HostVmBackendWriteResult.Success("测试写入完成。")))
+                .GetAwaiter().GetResult();
+            TestAssert.True(write.Succeeded, write.Message);
+
+            HostOperationStamp stamp = registry.CaptureOperationStamp(hostId);
+            TestAssert.True(
+                registry.ReportConnectionLoss(stamp, "测试连接丢失。"),
+                "The current host did not accept its connection-loss report.");
+
+            IReadOnlyList<AppLogEntry> entries = AppLog.Feed.GetSnapshot(hostId);
+            foreach (string source in new[] { "宿主切换", "虚拟机操作", "自动重连" })
+            {
+                TestAssert.True(
+                    entries.Any(entry => entry.Source == source),
+                    $"The owning host feed did not receive source: {source}");
+            }
+            TestAssert.True(
+                entries.All(entry => entry.HostId == hostId),
+                "The host feed contained an entry routed to a different host.");
+        }
+        finally
+        {
+            registry.Shutdown();
+            AppLog.Shutdown();
         }
     }
 

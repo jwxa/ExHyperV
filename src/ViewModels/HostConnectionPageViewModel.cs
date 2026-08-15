@@ -54,6 +54,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
     [ObservableProperty] private int _selectedWorkspaceTabIndex;
 
     public HostPreflightViewModel Preflight { get; }
+    public HostLogViewModel Logs { get; }
 
     public HostConnectionPageViewModel(
         HostProfileManager profileManager,
@@ -62,7 +63,8 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         HostPreflightPipeline preflightPipeline,
         HostConfigurationPipeline configurationPipeline,
         ISupportArtifactLocator supportArtifactLocator,
-        IHostConsoleRegistry? consoleRegistry = null)
+        IHostConsoleRegistry? consoleRegistry = null,
+        IHostLogFeed? logFeed = null)
     {
         _profileManager = profileManager;
         _sessionRegistry = sessionRegistry ?? throw new ArgumentNullException(nameof(sessionRegistry));
@@ -73,6 +75,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         _configurationPipeline = configurationPipeline;
         _supportArtifactLocator = supportArtifactLocator ?? throw new ArgumentNullException(nameof(supportArtifactLocator));
         Preflight = new HostPreflightViewModel(preflightPipeline);
+        Logs = new HostLogViewModel(logFeed ?? AppLog.Feed);
         _sessionRegistry.Changed += OnRegistryChanged;
         RefreshProfiles();
         UpdateActiveHostProperties();
@@ -218,6 +221,9 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         InvalidateConfigurationRun();
         _switchCancellation?.Cancel();
         Preflight.ClearTarget();
+        Logs.SelectHost(value?.Profile is { } selectedProfile
+            ? HostId.FromProfile(selectedProfile)
+            : HostId.Local);
         OnSelectionPropertiesChanged();
         ApplyReport(value?.Profile is { } profile && _reports.TryGetValue(profile.Id, out HostDiagnosticReport? report)
             ? report
@@ -314,7 +320,14 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         }
         catch (Exception ex)
         {
-            AppLog.Error("主机配置", $"删除主机配置 {profile.DisplayName} 失败。", new AppLogContext(profile.Address), ex);
+            AppLog.Error(
+                "主机配置",
+                $"删除主机配置 {profile.DisplayName} 失败。",
+                new AppLogContext(
+                    Host: profile.Address,
+                    HostId: HostId.FromProfile(profile),
+                    ErrorCategory: "ProfileDeleteFailed"),
+                ex);
             ShowError($"删除主机配置失败：{SensitiveDataRedactor.Redact(ex.Message)}");
         }
     }
@@ -353,7 +366,14 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         catch (Exception ex)
         {
             if (!_diagnosticRuns.IsCurrent(diagnosticRun, SelectedHost?.Profile?.Id)) return;
-            AppLog.Error("连接诊断", $"主机 {profile.DisplayName} 的诊断流水线失败。", new AppLogContext(profile.Address), ex);
+            AppLog.Error(
+                "连接诊断",
+                $"主机 {profile.DisplayName} 的诊断流水线失败。",
+                new AppLogContext(
+                    Host: profile.Address,
+                    HostId: HostId.FromProfile(profile),
+                    ErrorCategory: "DiagnosticPipelineFailed"),
+                ex);
             DiagnosticSummary = $"诊断失败：{SensitiveDataRedactor.Redact(ex.Message)}";
             ShowError(DiagnosticSummary);
         }
@@ -810,6 +830,7 @@ public partial class HostConnectionPageViewModel : PageViewModelBase, IDisposabl
         InvalidateConfigurationRun();
         InvalidateDiagnosticRun();
         _diagnosticRuns.Dispose();
+        Logs.Dispose();
         _switchCancellation?.Cancel();
         _switchCancellation?.Dispose();
     }

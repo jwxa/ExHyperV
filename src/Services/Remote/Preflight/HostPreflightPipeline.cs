@@ -3,6 +3,7 @@ using ExHyperV.Services.Logging;
 using ExHyperV.Services.Remote.Credentials;
 using ExHyperV.Services.Remote.Diagnostics;
 using ExHyperV.Services.Remote.Profiles;
+using ExHyperV.Services.Remote.Sessions;
 
 namespace ExHyperV.Services.Remote.Preflight;
 
@@ -19,6 +20,7 @@ public sealed class HostPreflightPipeline(
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(profile);
+        HostId hostId = HostId.FromProfile(profile);
         DateTimeOffset startedAt = _clock();
         var stopwatch = Stopwatch.StartNew();
         var findings = new List<HostPreflightFinding>();
@@ -164,7 +166,11 @@ public sealed class HostPreflightPipeline(
         void Log(HostPreflightStage stage, HostPreflightLogLevel level, string message, Exception? exception = null)
         {
             logs.Add(new HostPreflightLogEntry(_clock(), stage, level, message));
-            var context = new AppLogContext(profile.Address, Properties: new Dictionary<string, object?> { ["预检阶段"] = stage.ToString() });
+            var context = new AppLogContext(
+                Host: profile.Address,
+                Properties: new Dictionary<string, object?> { ["预检阶段"] = stage.ToString() },
+                HostId: hostId,
+                ErrorCategory: exception is null ? "None" : "PreflightReadFailed");
             switch (level)
             {
                 case HostPreflightLogLevel.Information:

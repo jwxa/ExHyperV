@@ -27,6 +27,7 @@
     <Compile Include="..\..\src\ViewModels\UiStatusBrushes.cs" Link="ViewModels\UiStatusBrushes.cs" />
     <Compile Include="..\..\src\ViewModels\HostConfigurationDialogViewModel.cs" Link="ViewModels\HostConfigurationDialogViewModel.cs" />
     <Compile Include="..\..\src\ViewModels\HostVmGroupViewModel.cs" Link="ViewModels\HostVmGroupViewModel.cs" />
+    <Compile Include="..\..\src\ViewModels\HostLogViewModel.cs" Link="ViewModels\HostLogViewModel.cs" />
     <Compile Include="..\..\src\Services\Remote\Vms\*.cs" Link="RemoteVms\%(Filename)%(Extension)" />
     <Compile Include="..\..\src\Services\Remote\Consoles\*.cs" Link="RemoteConsoles\%(Filename)%(Extension)" />
     <Compile Include="..\..\src\Tools\Api\ApiResponse.cs" Link="Tools\ApiResponse.cs" />

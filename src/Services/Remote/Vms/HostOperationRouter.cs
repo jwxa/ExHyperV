@@ -79,6 +79,10 @@ public sealed class HostOperationRouter(
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            AppLog.Warning(
+                "虚拟机操作",
+                "虚拟机读取已取消。",
+                CreateLogContext(hostId, context!, "读取", "Cancelled"));
             return new HostVmReadResult<T>(HostVmOperationStatus.Cancelled, default, "操作已取消。", context);
         }
         catch (Exception ex)
@@ -86,8 +90,15 @@ public sealed class HostOperationRouter(
             string message = SensitiveDataRedactor.Redact(ex.Message);
             if (!_sessions.CanApply(context!.Stamp))
                 return new HostVmReadResult<T>(HostVmOperationStatus.Stale, default, "宿主会话已改变，已丢弃旧会话返回的错误。", context);
-            if (!context.Target.IsLocal && HostConnectionFailureClassifier.IsConnectionLoss(ex))
+            bool connectionLost = !context.Target.IsLocal
+                && HostConnectionFailureClassifier.IsConnectionLoss(ex);
+            if (connectionLost)
                 _sessions.ReportConnectionLoss(context.Stamp, message);
+            AppLog.Error(
+                "虚拟机操作",
+                $"虚拟机读取失败：{message}",
+                CreateLogContext(hostId, context, "读取", connectionLost ? "ConnectionLost" : "ReadFailed"),
+                ex);
             return new HostVmReadResult<T>(HostVmOperationStatus.Failed, default, message, context);
         }
     }
@@ -132,16 +143,44 @@ public sealed class HostOperationRouter(
 
             try
             {
+                AppLog.Information(
+                    "虚拟机操作",
+                    "开始执行虚拟机写操作。",
+                    CreateLogContext(hostId, context, "写入"));
                 WmiContext wmiContext = _contextResolver.Resolve(context);
                 HostVmBackendWriteResult result = await operation(wmiContext, cancellationToken);
                 if (!_sessions.CanApply(lease.Stamp))
                     return new HostVmWriteResult(HostVmOperationStatus.Stale, "宿主会话已改变，已忽略旧会话操作结果。", context);
 
-                if (!result.Succeeded
+                bool connectionLost = !result.Succeeded
                     && !context.Target.IsLocal
                     && result.FailureException is not null
-                    && HostConnectionFailureClassifier.IsConnectionLoss(result.FailureException))
+                    && HostConnectionFailureClassifier.IsConnectionLoss(result.FailureException);
+                if (connectionLost)
                     _sessions.ReportConnectionLoss(context.Stamp, SensitiveDataRedactor.Redact(result.Message));
+
+                string resultMessage = string.IsNullOrWhiteSpace(result.Message)
+                    ? result.Succeeded ? "虚拟机写操作已完成。" : "虚拟机写操作失败。"
+                    : result.Message;
+                if (result.Succeeded)
+                {
+                    AppLog.Information(
+                        "虚拟机操作",
+                        resultMessage,
+                        CreateLogContext(hostId, context, "写入"));
+                }
+                else
+                {
+                    AppLog.Warning(
+                        "虚拟机操作",
+                        resultMessage,
+                        CreateLogContext(
+                            hostId,
+                            context,
+                            "写入",
+                            connectionLost ? "ConnectionLost" : "WriteFailed"),
+                        result.FailureException);
+                }
 
                 return result.Succeeded
                     ? new HostVmWriteResult(HostVmOperationStatus.Succeeded, result.Message, context)
@@ -152,17 +191,39 @@ public sealed class HostOperationRouter(
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                AppLog.Warning(
+                    "虚拟机操作",
+                    "虚拟机写操作已取消。",
+                    CreateLogContext(hostId, context, "写入", "Cancelled"));
                 return new HostVmWriteResult(HostVmOperationStatus.Cancelled, "操作已取消。", context);
             }
             catch (Exception ex)
             {
                 string message = SensitiveDataRedactor.Redact(ex.Message);
-                if (!context.Target.IsLocal && HostConnectionFailureClassifier.IsConnectionLoss(ex))
+                bool connectionLost = !context.Target.IsLocal
+                    && HostConnectionFailureClassifier.IsConnectionLoss(ex);
+                if (connectionLost)
                     _sessions.ReportConnectionLoss(context.Stamp, message);
+                AppLog.Error(
+                    "虚拟机操作",
+                    $"虚拟机写操作失败：{message}",
+                    CreateLogContext(hostId, context, "写入", connectionLost ? "ConnectionLost" : "WriteFailed"),
+                    ex);
                 return new HostVmWriteResult(HostVmOperationStatus.Failed, message, context);
             }
         }
     }
+
+    private static AppLogContext CreateLogContext(
+        HostId hostId,
+        HostManagementOperationContext context,
+        string operation,
+        string errorCategory = "None") => new(
+            Host: context.Target.IsLocal ? Environment.MachineName : context.Target.Address,
+            SessionGeneration: context.Stamp.Generation,
+            Properties: new Dictionary<string, object?> { ["操作类型"] = operation },
+            HostId: hostId,
+            ErrorCategory: errorCategory);
 
     private bool CanUseExpectedStamp(HostId hostId, HostOperationStamp stamp) =>
         (hostId.IsLocal ? stamp.ProfileId is null : stamp.ProfileId == hostId.ProfileId)

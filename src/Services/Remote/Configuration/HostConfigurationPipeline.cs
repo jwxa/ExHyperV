@@ -3,6 +3,7 @@ using ExHyperV.Services.Remote.Credentials;
 using ExHyperV.Services.Remote.Diagnostics;
 using ExHyperV.Services.Remote.Preflight;
 using ExHyperV.Services.Remote.Profiles;
+using ExHyperV.Services.Remote.Sessions;
 
 namespace ExHyperV.Services.Remote.Configuration;
 
@@ -24,6 +25,7 @@ public sealed class HostConfigurationPipeline(
         ArgumentNullException.ThrowIfNull(profile);
         ArgumentNullException.ThrowIfNull(approvedReport);
         ArgumentNullException.ThrowIfNull(approvedPlan);
+        HostId hostId = HostId.FromProfile(profile);
         var logs = new List<string>();
         var results = new List<HostConfigurationStepResult>();
         var applied = new List<HostConfigurationCommand>();
@@ -209,7 +211,10 @@ public sealed class HostConfigurationPipeline(
         void Log(string message, bool warning = false, Exception? exception = null)
         {
             logs.Add(message);
-            var context = new AppLogContext(profile.Address);
+            var context = new AppLogContext(
+                Host: profile.Address,
+                HostId: hostId,
+                ErrorCategory: exception is null ? "None" : "ConfigurationFailed");
             if (warning) AppLog.Warning("远程配置", message, context, exception);
             else AppLog.Information("远程配置", message, context);
         }

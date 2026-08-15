@@ -39,22 +39,26 @@ public sealed class RollingFileLogger : IDisposable
         string component,
         string message,
         AppLogContext? context = null,
-        Exception? exception = null)
+        Exception? exception = null) =>
+        Write(AppLogEntry.Create(_options.Clock(), level, component, message, context, exception));
+
+    public void Write(AppLogEntry entry)
     {
+        ArgumentNullException.ThrowIfNull(entry);
         ObjectDisposedException.ThrowIf(_disposed, this);
-        byte[] entry = BuildEntry(level, component, message, context, exception);
+        byte[] bytes = BuildEntry(entry);
 
         lock (_sync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            RotateIfNeeded(entry.LongLength);
+            RotateIfNeeded(bytes.LongLength);
 
             using var stream = new FileStream(
                 CurrentFilePath,
                 FileMode.Append,
                 FileAccess.Write,
                 FileShare.ReadWrite | FileShare.Delete);
-            stream.Write(entry);
+            stream.Write(bytes);
             stream.Flush(flushToDisk: true);
         }
     }
@@ -64,18 +68,10 @@ public sealed class RollingFileLogger : IDisposable
         lock (_sync) _disposed = true;
     }
 
-    private byte[] BuildEntry(
-        AppLogLevel level,
-        string component,
-        string message,
-        AppLogContext? context,
-        Exception? exception)
+    private byte[] BuildEntry(AppLogEntry entry)
     {
-        string safeComponent = NormalizeSingleLine(SensitiveDataRedactor.Redact(component));
-        string safeMessage = NormalizeSingleLine(SensitiveDataRedactor.Redact(message));
-        string prefix = FormatPrefix(level, safeComponent, context);
-        string suffix = FormatProperties(context?.Properties) + FormatException(exception);
-        string line = prefix + safeMessage + suffix + Environment.NewLine;
+        string prefix = FormatPrefix(entry);
+        string line = FormatEntry(entry) + Environment.NewLine;
         byte[] bytes = Utf8WithoutBom.GetBytes(line);
         if (bytes.LongLength <= _options.MaxFileBytes) return bytes;
 
@@ -86,7 +82,7 @@ public sealed class RollingFileLogger : IDisposable
         {
             long availableMessageBytes = _options.MaxFileBytes - fixedBytes;
             return Utf8WithoutBom.GetBytes(
-                prefix + TruncateToUtf8ByteCount(safeMessage, availableMessageBytes) + marker + Environment.NewLine);
+                prefix + TruncateToUtf8ByteCount(entry.Message, availableMessageBytes) + marker + Environment.NewLine);
         }
 
         const string fallback = "[日志条目无法写入：文件上限过小]";
@@ -116,50 +112,54 @@ public sealed class RollingFileLogger : IDisposable
         return value[..length];
     }
 
-    private string FormatPrefix(AppLogLevel level, string component, AppLogContext? context)
+    internal static string FormatEntry(AppLogEntry entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        return FormatPrefix(entry)
+            + entry.Message
+            + FormatProperties(entry.Properties)
+            + FormatException(entry.ExceptionText);
+    }
+
+    private static string FormatPrefix(AppLogEntry entry)
     {
         var builder = new StringBuilder(128);
         builder.Append('[')
-            .Append(_options.Clock().ToString("yyyy-MM-dd HH:mm:ss.fff zzz", CultureInfo.InvariantCulture))
+            .Append(entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff zzz", CultureInfo.InvariantCulture))
             .Append("] [")
-            .Append(ToChineseLevel(level))
+            .Append(ToChineseLevel(entry.Level))
             .Append("] [")
-            .Append(string.IsNullOrWhiteSpace(component) ? "应用" : component)
+            .Append(string.IsNullOrWhiteSpace(entry.Source) ? "应用" : entry.Source)
+            .Append("] [错误分类=")
+            .Append(entry.ErrorCategory)
             .Append(']');
 
-        if (!string.IsNullOrWhiteSpace(context?.Host))
-            builder.Append(" [宿主=").Append(NormalizeSingleLine(SensitiveDataRedactor.Redact(context.Host))).Append(']');
-        if (context?.SessionGeneration is long generation)
+        if (!string.IsNullOrWhiteSpace(entry.Host))
+            builder.Append(" [宿主=").Append(entry.Host).Append(']');
+        if (entry.SessionGeneration is long generation)
             builder.Append(" [会话=").Append(generation.ToString(CultureInfo.InvariantCulture)).Append(']');
         builder.Append(' ');
         return builder.ToString();
     }
 
-    private static string FormatProperties(IReadOnlyDictionary<string, object?>? properties)
+    private static string FormatProperties(IReadOnlyList<AppLogProperty> properties)
     {
-        if (properties is null || properties.Count == 0) return string.Empty;
+        if (properties.Count == 0) return string.Empty;
 
         var builder = new StringBuilder(" | ");
         bool first = true;
-        foreach ((string key, object? value) in properties.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        foreach (AppLogProperty property in properties)
         {
             if (!first) builder.Append(' ');
             first = false;
-            string safeKey = NormalizeSingleLine(SensitiveDataRedactor.Redact(key));
-            string safeValue = SensitiveDataRedactor.IsSensitiveKey(key) || SensitiveDataRedactor.IsSensitiveValue(value)
-                ? SensitiveDataRedactor.RedactedValue
-                : NormalizeSingleLine(SensitiveDataRedactor.Redact(Convert.ToString(value, CultureInfo.InvariantCulture)));
-            builder.Append(safeKey).Append('=').Append(safeValue);
+            builder.Append(property.Name).Append('=').Append(property.Value);
         }
         return builder.ToString();
     }
 
-    private static string FormatException(Exception? exception) => exception is null
+    private static string FormatException(string exceptionText) => string.IsNullOrEmpty(exceptionText)
         ? string.Empty
-        : $" | 异常={NormalizeSingleLine(SensitiveDataRedactor.Redact(exception.ToString()))}";
-
-    private static string NormalizeSingleLine(string? value) =>
-        (value ?? string.Empty).Replace("\r", "\\r", StringComparison.Ordinal).Replace("\n", "\\n", StringComparison.Ordinal);
+        : $" | 异常={exceptionText}";
 
     private static string ToChineseLevel(AppLogLevel level) => level switch
     {

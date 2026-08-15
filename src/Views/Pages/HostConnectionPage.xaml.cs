@@ -1,3 +1,6 @@
+using System.Collections.Specialized;
+using System.Windows.Controls;
+using System.Windows.Threading;
 using ExHyperV.Services;
 using ExHyperV.Services.Remote.Credentials;
 using ExHyperV.Services.Remote.Configuration;
@@ -12,6 +15,8 @@ namespace ExHyperV.Views;
 public partial class HostConnectionPage
 {
     private bool _isNarrow;
+    private bool _isAutoScrollingLogs;
+    private bool _logHandlersAttached;
 
     public HostConnectionPage() : this(CreateViewModel())
     {
@@ -23,6 +28,8 @@ public partial class HostConnectionPage
         DataContext = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         SizeChanged += (_, _) => ApplyResponsiveLayout(ActualWidth < 780);
         Loaded += (_, _) => ApplyResponsiveLayout(ActualWidth < 780);
+        Loaded += OnPageLoaded;
+        Unloaded += OnPageUnloaded;
     }
 
     private static HostConnectionPageViewModel CreateViewModel()
@@ -50,6 +57,54 @@ public partial class HostConnectionPage
             preflightPipeline,
             configurationPipeline,
             new WindowsSupportArtifactLocator());
+    }
+
+    private HostLogViewModel Logs => ((HostConnectionPageViewModel)DataContext).Logs;
+
+    private void OnPageLoaded(object sender, System.Windows.RoutedEventArgs e)
+    {
+        if (!_logHandlersAttached)
+        {
+            Logs.Entries.CollectionChanged += OnLiveLogEntriesChanged;
+            Logs.FollowLatestRequested += OnFollowLatestRequested;
+            _logHandlersAttached = true;
+        }
+        if (Logs.IsFollowingLatest) ScrollLogsToLatest();
+    }
+
+    private void OnPageUnloaded(object sender, System.Windows.RoutedEventArgs e)
+    {
+        if (!_logHandlersAttached) return;
+        Logs.Entries.CollectionChanged -= OnLiveLogEntriesChanged;
+        Logs.FollowLatestRequested -= OnFollowLatestRequested;
+        _logHandlersAttached = false;
+    }
+
+    private void OnLiveLogEntriesChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (!Logs.IsFollowingLatest) return;
+        Dispatcher.BeginInvoke(ScrollLogsToLatest, DispatcherPriority.Loaded);
+    }
+
+    private void OnFollowLatestRequested(object? sender, EventArgs e) =>
+        Dispatcher.BeginInvoke(ScrollLogsToLatest, DispatcherPriority.Loaded);
+
+    private void OnLiveLogScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        if (_isAutoScrollingLogs || !Logs.IsFollowingLatest) return;
+        bool movedUp = e.VerticalChange < -0.1;
+        bool isAwayFromBottom = e.VerticalOffset < e.ExtentHeight - e.ViewportHeight - 1;
+        if (movedUp && isAwayFromBottom) Logs.PauseFollowingLatest();
+    }
+
+    private void ScrollLogsToLatest()
+    {
+        if (LiveLogList.Items.Count == 0) return;
+        _isAutoScrollingLogs = true;
+        LiveLogList.ScrollIntoView(LiveLogList.Items[^1]);
+        Dispatcher.BeginInvoke(
+            () => _isAutoScrollingLogs = false,
+            DispatcherPriority.ContextIdle);
     }
 
     private void ApplyResponsiveLayout(bool narrow)

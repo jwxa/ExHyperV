@@ -909,22 +909,97 @@
                     </TabItem>
 
                     <TabItem Header="日志">
-                        <Grid Margin="0,18,0,0">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <StackPanel>
-                                <TextBlock Text="ExHyperV 滚动日志" FontWeight="SemiBold" FontSize="16"/>
-                                <TextBlock Text="当前日志和上一份日志各最多 100 MB，使用 UTF-8 无 BOM。"
-                                           Margin="0,5,0,0" Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"/>
-                            </StackPanel>
-                            <ui:Button Grid.Column="1" Command="{Binding OpenLogsCommand}" Appearance="Secondary">
-                                <StackPanel Orientation="Horizontal">
-                                    <ui:SymbolIcon Symbol="FolderOpen24" Margin="0,0,7,0"/>
-                                    <TextBlock Text="打开日志目录"/>
+                        <Grid Margin="0,14,0,0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="10"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="实时日志" FontWeight="SemiBold" FontSize="16"/>
+                                    <TextBlock Text="{Binding SelectedDisplayName}" Margin="0,3,0,0"
+                                               Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"/>
                                 </StackPanel>
-                            </ui:Button>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ui:Button Width="34" Height="34" Padding="0" Margin="0,0,8,0"
+                                               Command="{Binding Logs.ReturnToLatestCommand}"
+                                               Visibility="{Binding Logs.IsFollowingLatest, Converter={StaticResource BoolToVis}, ConverterParameter=Invert}"
+                                               ToolTip="回到最新">
+                                        <ui:SymbolIcon Symbol="ArrowDown24" FontSize="16"/>
+                                    </ui:Button>
+                                    <ui:Button Width="34" Height="34" Padding="0"
+                                               Command="{Binding OpenLogsCommand}"
+                                               ToolTip="打开日志目录">
+                                        <ui:SymbolIcon Symbol="FolderOpen24" FontSize="16"/>
+                                    </ui:Button>
+                                </StackPanel>
+                            </Grid>
+
+                            <Grid Grid.Row="2">
+                                <ListView x:Name="LiveLogList"
+                                          ItemsSource="{Binding Logs.Entries}"
+                                          BorderBrush="{ui:ThemeResource CardStrokeColorDefaultBrush}"
+                                          BorderThickness="1"
+                                          Background="{ui:ThemeResource ControlFillColorDefaultBrush}"
+                                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                          ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                          ScrollViewer.CanContentScroll="True"
+                                          VirtualizingPanel.IsVirtualizing="True"
+                                          VirtualizingPanel.VirtualizationMode="Recycling"
+                                          ScrollViewer.ScrollChanged="OnLiveLogScrollChanged">
+                                    <ListView.ItemContainerStyle>
+                                        <Style TargetType="ListViewItem">
+                                            <Setter Property="Padding" Value="0"/>
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                        </Style>
+                                    </ListView.ItemContainerStyle>
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="10,7">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="14"/>
+                                                    <ColumnDefinition Width="88"/>
+                                                    <ColumnDefinition Width="54"/>
+                                                    <ColumnDefinition Width="112"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <Ellipse Width="7" Height="7" Fill="{Binding LevelBrush}"
+                                                         HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                                <TextBlock Grid.Column="1" Text="{Binding TimestampText}"
+                                                           FontFamily="Consolas" FontSize="11" VerticalAlignment="Top"
+                                                           Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"/>
+                                                <TextBlock Grid.Column="2" Text="{Binding LevelText}"
+                                                           Foreground="{Binding LevelBrush}" FontSize="12"/>
+                                                <TextBlock Grid.Column="3" Text="{Binding Source}" FontSize="12"
+                                                           FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
+                                                           ToolTip="{Binding Source}"/>
+                                                <StackPanel Grid.Column="4" Margin="4,0,12,0">
+                                                    <TextBlock Text="{Binding Message}" TextWrapping="Wrap"/>
+                                                    <TextBlock Text="{Binding DetailText}" TextWrapping="Wrap"
+                                                               FontFamily="Consolas" FontSize="11" Margin="0,3,0,0"
+                                                               Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"
+                                                               Visibility="{Binding HasDetail, Converter={StaticResource BoolToVis}}"/>
+                                                </StackPanel>
+                                                <TextBlock Grid.Column="5" Text="{Binding ErrorCategoryText}"
+                                                           FontFamily="Consolas" FontSize="11"
+                                                           Foreground="{Binding LevelBrush}"
+                                                           Visibility="{Binding HasErrorCategory, Converter={StaticResource BoolToVis}}"/>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
+                                <TextBlock Text="当前宿主暂无日志。"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                                           Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}"
+                                           IsHitTestVisible="False"
+                                           Visibility="{Binding Logs.HasEntries, Converter={StaticResource BoolToVis}, ConverterParameter=Invert}"/>
+                            </Grid>
                         </Grid>
                     </TabItem>
                 </TabControl>

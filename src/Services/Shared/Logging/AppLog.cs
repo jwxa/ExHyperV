@@ -5,8 +5,10 @@ namespace ExHyperV.Services.Logging;
 public static class AppLog
 {
     private static readonly object Sync = new();
+    private static readonly HostLogFeed HostFeed = new();
     private static RollingFileLogger? _logger;
 
+    public static IHostLogFeed Feed => HostFeed;
     public static bool IsAvailable { get; private set; }
     public static string? UnavailableReason { get; private set; }
     public static string LogDirectory { get; private set; } = Path.Combine(AppContext.BaseDirectory, "logs");
@@ -24,6 +26,7 @@ public static class AppLog
             try
             {
                 _logger = new RollingFileLogger(new RollingFileLoggerOptions { LogDirectory = LogDirectory });
+                HostFeed.Clear();
                 IsAvailable = true;
                 WriteCore(AppLogLevel.Information, "应用", "日志服务已启动。", null, null);
             }
@@ -73,8 +76,24 @@ public static class AppLog
         }
     }
 
-    private static void WriteCore(AppLogLevel level, string component, string message, AppLogContext? context, Exception? exception) =>
-        _logger?.Write(level, component, message, context, exception);
+    private static void WriteCore(
+        AppLogLevel level,
+        string component,
+        string message,
+        AppLogContext? context,
+        Exception? exception)
+    {
+        if (_logger is null) return;
+        AppLogEntry entry = AppLogEntry.Create(
+            DateTimeOffset.Now,
+            level,
+            component,
+            message,
+            context,
+            exception);
+        _logger.Write(entry);
+        HostFeed.Publish(entry);
+    }
 
     private static void NotifyUnavailable(string reason)
     {

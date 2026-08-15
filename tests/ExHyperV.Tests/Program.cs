@@ -40,6 +40,8 @@ tests.AddRange(SessionSwitchTests.All);
 tests.AddRange(VmOperationTests.All);
 tests.AddRange(ConsoleSessionTests.All);
 tests.AddRange(HostConsoleRegistryTests.All);
+tests.AddRange(HostLogFeedTests.All);
+tests.AddRange(HostLogViewModelTests.All);
 tests.AddRange(ReconnectTests.All);
 tests.AddRange(CapabilityTests.All);
 tests.AddRange(PreflightTests.All);
@@ -118,16 +120,15 @@ static void RedactsMessagesPropertiesAndCredentialObjects()
     {
         "plain-property-password", "property-key-secret", "must-also-be-redacted",
         "plain-property-token", "credential-object-secret",
-        "message-password", "message-token", "multi word password", "bearer-token", "json-secret", "exception-token"
+        "message-password", "message-token", "multi word password", "bearer-token", "json-secret", "exception-token",
+        "password", "token", "credential", "authorization", "client_secret"
     })
     {
-        Assert.DoesNotContain(secret, text);
+        Assert.DoesNotContain(secret, text.ToLowerInvariant());
     }
 
-    Assert.Contains("password=[REDACTED]", text);
-    Assert.Contains("token:[REDACTED]", text);
+    Assert.Contains("[REDACTED]", text);
     Assert.Contains("identity=JWXA\\Administrator", text);
-    Assert.Contains("auth=[REDACTED]", text);
 }
 
 static void RotatesAtLimitAndKeepsOnlyTwoFiles()
