@@ -94,8 +94,8 @@ namespace ExHyperV.ViewModels
                         assignment.Manu = matchedHostGpu.Manu;
                         assignment.Vendor = matchedHostGpu.Vendor;
                         assignment.DriverVersion = matchedHostGpu.DriverVersion;
-                        assignment.Ram = matchedHostGpu.Ram;
-                        assignment.PName = matchedHostGpu.Pname;
+                        assignment.MemoryBytes = matchedHostGpu.MemoryBytes;
+                        assignment.PartitionableGpuPath = matchedHostGpu.PartitionableGpuPath;
                     }
                     else
                     {
@@ -121,8 +121,8 @@ namespace ExHyperV.ViewModels
                             target.Manu = source.Manu;
                             target.Vendor = source.Vendor;
                             target.DriverVersion = source.DriverVersion;
-                            target.Ram = source.Ram;
-                            target.PName = source.PName;
+                            target.MemoryBytes = source.MemoryBytes;
+                            target.PartitionableGpuPath = source.PartitionableGpuPath;
                         }
                     }
                     else
@@ -190,7 +190,7 @@ namespace ExHyperV.ViewModels
             HasHostCapability(HostCapabilityKind.PcieDevices)
             && SelectedVm != null
             && assignment != null
-            && !string.IsNullOrWhiteSpace(assignment.PName);
+            && !string.IsNullOrWhiteSpace(assignment.PartitionableGpuPath);
 
         [RelayCommand(CanExecute = nameof(CanUpdateGpuDrivers))]
         private async Task UpdateGpuDriversAsync(VmGpuAssignment assignment)
@@ -207,8 +207,8 @@ namespace ExHyperV.ViewModels
                     Manu = assignment.Manu,
                     Vendor = assignment.Vendor,
                     DriverVersion = assignment.DriverVersion,
-                    Pname = assignment.PName,
-                    Ram = assignment.Ram
+                    PartitionableGpuPath = assignment.PartitionableGpuPath,
+                    MemoryBytes = assignment.MemoryBytes
                 };
 
                 _currentProcessingGpuAdapterId = null;
@@ -342,7 +342,7 @@ namespace ExHyperV.ViewModels
 
             AppendLog(string.Format(Properties.Resources.Msg_Gpu_WorkStart, SelectedVm.Name));
             AppendLog(string.Format(Properties.Resources.Msg_Gpu_Selected, SelectedHostGpu.Name));
-            AppendLog(string.Format(Properties.Resources.Msg_Gpu_Path, SelectedHostGpu.Pname));
+            AppendLog(string.Format(Properties.Resources.Msg_Gpu_Path, SelectedHostGpu.PartitionableGpuPath));
 
             GpuTasks.Clear();
 
@@ -434,7 +434,7 @@ namespace ExHyperV.ViewModels
                             break;
 
                         case GpuTaskType.PowerCheck:
-                            if (_needConfig || tasks.Any(t => t.TaskType == GpuTaskType.Driver))
+                            if (tasks.Any(t => t.TaskType == GpuTaskType.Driver))
                             {
                                 var (isOff, state) = await _queryService.IsVmPoweredOffAsync(SelectedVm.Name);
                                 if (!isOff)
@@ -461,8 +461,18 @@ namespace ExHyperV.ViewModels
                         case GpuTaskType.Optimization:
                             if (_needConfig)
                             {
-                                bool optOk = await _vmGpuService.OptimizeVmForGpuAsync(SelectedVm.Name);
-                                task.Description = optOk ? Properties.Resources.Msg_Gpu_MmioOk : Properties.Resources.Error_Gpu_OptFail;
+                                var (isOff, _) = await _queryService.IsVmPoweredOffAsync(SelectedVm.Name);
+                                if (!isOff && !tasks.Any(t => t.TaskType == GpuTaskType.Driver))
+                                {
+                                    // A no-driver deployment must not interrupt a running VM. MMIO tuning
+                                    // is best-effort and is deferred until a later powered-off deployment.
+                                    task.Description = Properties.Resources.Msg_Skip;
+                                }
+                                else
+                                {
+                                    bool optOk = await _vmGpuService.OptimizeVmForGpuAsync(SelectedVm.Name);
+                                    task.Description = optOk ? Properties.Resources.Msg_Gpu_MmioOk : Properties.Resources.Error_Gpu_OptFail;
+                                }
                             }
                             else
                             {
@@ -471,8 +481,8 @@ namespace ExHyperV.ViewModels
                             break;
 
                         case GpuTaskType.Assign:
-                            string targetPath = !string.IsNullOrEmpty(SelectedHostGpu.Pname)
-                                                ? SelectedHostGpu.Pname
+                            string targetPath = !string.IsNullOrEmpty(SelectedHostGpu.PartitionableGpuPath)
+                                                ? SelectedHostGpu.PartitionableGpuPath
                                                 : SelectedHostGpu.InstanceId;
 
                             var adaptersBeforeAssignment =
@@ -527,7 +537,7 @@ namespace ExHyperV.ViewModels
                                         task.Description = Properties.Resources.Msg_Gpu_DetectWin;
                                         var syncRes = await _vmGpuService.SyncWindowsDriversAsync(
                                             SelectedVm.Name,
-                                            SelectedHostGpu.Pname,
+                                            SelectedHostGpu.PartitionableGpuPath,
                                             SelectedHostGpu.Manu,
                                             singlePart,
                                             msg => { task.Description = msg; AppendLog(msg); });
@@ -604,7 +614,7 @@ namespace ExHyperV.ViewModels
 
                 var result = await _vmGpuService.SyncWindowsDriversAsync(
                     SelectedVm.Name,
-                    SelectedHostGpu.Pname,
+                    SelectedHostGpu.PartitionableGpuPath,
                     SelectedHostGpu.Manu,
                     partition,
                     msg => {
@@ -783,6 +793,10 @@ namespace ExHyperV.ViewModels
             // 6. 执行部署
             string result = await _vmGpuService.ProvisionLinuxGpuAsync(
                 SelectedVm.Name,
+                !string.IsNullOrEmpty(SelectedHostGpu.PartitionableGpuPath)
+                    ? SelectedHostGpu.PartitionableGpuPath
+                    : SelectedHostGpu.InstanceId,
+                SelectedHostGpu.Manu,
                 SelectedLinuxScript,
                 creds,
                 msg => {

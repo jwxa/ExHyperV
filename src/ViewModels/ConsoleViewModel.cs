@@ -24,6 +24,8 @@ namespace ExHyperV.ViewModels
         private DispatcherTimer _statusTimer = null!;
         private bool _polling;   // 防止上一次轮询(WMI 慢)未完成时重入
         private int _connectionLossProbeActive;
+        private const int DefaultEnhancedWidth = 1920;
+        private const int DefaultEnhancedHeight = 1080;
 
         // ===== 基础属性 =====
 
@@ -41,6 +43,8 @@ namespace ExHyperV.ViewModels
         private bool _canWriteToCapturedHost;
         public bool IsLocalHost => _session.Target.IsLocal;
         public bool IsCadAvailable => IsLocalHost && !IsEnhancedMode;
+        public int InitialEnhancedWidth { get; }
+        public int InitialEnhancedHeight { get; }
         
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(IsNotBusy))]
@@ -83,10 +87,13 @@ namespace ExHyperV.ViewModels
             else if (!string.IsNullOrEmpty(savedZoom) && ZoomOptions.Contains(savedZoom)) SelectedZoom = savedZoom;
             // 使用保存的分辨率直接建立增强会话；无保存值时先由基本会话取得分辨率。
             _preferEnhanced = SettingsService.GetDefaultConnectionMode() == ModeEnhancedToken;
-            if (_preferEnhanced && SettingsService.GetDefaultConsoleResolution() is { } res)
+            var savedResolution = SettingsService.GetDefaultConsoleResolution();
+            InitialEnhancedWidth = savedResolution?.Width ?? DefaultEnhancedWidth;
+            InitialEnhancedHeight = savedResolution?.Height ?? DefaultEnhancedHeight;
+            if (_preferEnhanced)
             {
-                _currentWidth = res.Width;
-                _currentHeight = res.Height;
+                _currentWidth = InitialEnhancedWidth;
+                _currentHeight = InitialEnhancedHeight;
             }
             StartStatusPolling();
         }
