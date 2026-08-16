@@ -5,8 +5,8 @@
 - 设计状态：已确认。
 - 跟踪规格：[GitHub Issue #14](https://github.com/jwxa/ExHyperV/issues/14)，标签 `ready-for-agent`。
 - 实施 Issues：[#15](https://github.com/jwxa/ExHyperV/issues/15) 至 [#22](https://github.com/jwxa/ExHyperV/issues/22)，均为 OPEN 且带 `ready-for-agent`。
-- 实施状态：#15-#22 的本地实现与验收均已完成；尚未 push，GitHub Issues 保持 OPEN。
-- 已完成：[#15 扩展宿主身份与多会话注册表](https://github.com/jwxa/ExHyperV/issues/15)、[#16 本机与首台远程并列管理](https://github.com/jwxa/ExHyperV/issues/16)、[#17 多台远程宿主与隔离操作](https://github.com/jwxa/ExHyperV/issues/17)、[#18 旧数据与每宿主独立自动重连](https://github.com/jwxa/ExHyperV/issues/18)、[#19 安全断开宿主及其控制台](https://github.com/jwxa/ExHyperV/issues/19)、[#20 当前宿主实时脱敏日志](https://github.com/jwxa/ExHyperV/issues/20)、[#21 按诊断结果提供设置检查与修复](https://github.com/jwxa/ExHyperV/issues/21)、[#22 收缩旧活动宿主模型并完成发布验收](https://github.com/jwxa/ExHyperV/issues/22)。
+- 实施状态：#15-#21 已完成；#22 的缺失图标修复已通过自动化和构建，等待用户在修复版中复核；尚未 push，GitHub Issues 保持 OPEN。
+- 已完成：[#15 扩展宿主身份与多会话注册表](https://github.com/jwxa/ExHyperV/issues/15)、[#16 本机与首台远程并列管理](https://github.com/jwxa/ExHyperV/issues/16)、[#17 多台远程宿主与隔离操作](https://github.com/jwxa/ExHyperV/issues/17)、[#18 旧数据与每宿主独立自动重连](https://github.com/jwxa/ExHyperV/issues/18)、[#19 安全断开宿主及其控制台](https://github.com/jwxa/ExHyperV/issues/19)、[#20 当前宿主实时脱敏日志](https://github.com/jwxa/ExHyperV/issues/20)、[#21 按诊断结果提供设置检查与修复](https://github.com/jwxa/ExHyperV/issues/21)。
 - 规格来源：`doc/multi-host-management-spec.md`。
 - 设计来源：`doc/multi-host-management-design.md`。
 
@@ -33,14 +33,15 @@
 - 已建立 #22 的 Full Single 子任务；收口范围限定为删除产品全局活动宿主兼容路径、迁移最终验收、统一主题资源和更新用户文档，不重写每宿主连接协议。
 - #22 已完成主体实现：删除产品全局活动宿主兼容路径，VM、控制台和本机专属操作统一通过注册表与显式 `HostId` 路由；本机固定存在，多远程宿主独立连接、重连和断开。
 - 完成度复审发现旧的 8 张视觉截图虽覆盖亮色/暗色与宽/窄窗口，但暗色日志来源/消息仍为黑色，亮色禁用连接按钮对比度不足。当前工作树已为日志正文显式使用主题主文字色，并让不可执行的连接动作使用中性 `Secondary` 外观；发布收敛测试已覆盖这两个合同。
-- 最新非交互验证：226/226 测试；Release/WPF 0 错误、247 个既有警告；32 个 XAML 可解析；UTF-8 无 BOM、冲突标记和差异检查通过。
+- 最新非交互验证：227/227 测试；Release/WPF 0 错误、247 个既有警告；32 个 XAML 可解析；UTF-8 无 BOM、冲突标记和差异检查通过。
 - #22 最终受控宿主只读验收通过：`10.0.0.6` 的 WMI/DCOM、TCP 2179、1 台 VM、控制台捕获和主动断开成功；7 项通过、6 项安全跳过、0 失败，四个危险开关均为 `false`。
-- #22 修复后人工视觉复核通过：用户确认亮色/暗色与宽/窄窗口下，日志正文和禁用连接按钮可读，页面无错位、重叠或文字截断；#15-#22 共 66/66 条验收要求均有证据。
+- #22 后续截图推翻了此前的完整视觉通过结论：导航、远程主机卡片和详情标题使用的 `Server24` 不存在于随程序发布的裁剪字体。现已统一复用可用的 `Desktop24`，详情标题跟随当前列表项图标，并新增 `Release_HostIconsUsePackagedGlyph` 回归测试；等待用户复核修复版。
 
 ## 下一步
 
-1. 按维护者安排 push；当前不关闭 #15-#22 或父 Issue #14。
-2. 远端评审与合并完成后，再按 Issue 流程更新状态。
+1. 用户关闭正在运行的旧版，并打开 `src/bin/Release-icon-fix/Release/net8.0-windows/ExHyperV.exe` 复核主机图标。
+2. 视觉复核通过后恢复 #22 的 DONE 状态；当前不关闭 #15-#22 或父 Issue #14。
+3. 按维护者安排进行 push、远端评审与合并。
 
 ## 注意事项
 

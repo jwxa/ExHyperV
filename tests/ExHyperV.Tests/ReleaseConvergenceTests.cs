@@ -6,6 +6,7 @@ internal static class ReleaseConvergenceTests
         ("Release_LocalCapabilitiesUseExplicitLocalHost", LocalCapabilitiesUseExplicitLocalHost),
         ("Release_ControlledRunnerUsesMultiHostRegistry", ControlledRunnerUsesMultiHostRegistry),
         ("Release_RemoteSurfacesUseThemeResources", RemoteSurfacesUseThemeResources),
+        ("Release_HostIconsUsePackagedGlyph", HostIconsUsePackagedGlyph),
         ("Release_AzureLeasePreservesRemotePowerRouting", AzureLeasePreservesRemotePowerRouting),
         ("Release_PermanentAzureToggleIsRemoved", PermanentAzureToggleIsRemoved),
         ("Release_LocalFolderAndPurgeSafetyAreWired", LocalFolderAndPurgeSafetyAreWired),
@@ -92,6 +93,23 @@ internal static class ReleaseConvergenceTests
         TestAssert.Contains("ControlAppearance.Secondary", connectionAppearance);
         TestAssert.Contains("ControlFillColorSecondaryBrush", hostPage);
         TestAssert.Contains("ControlFillColorSecondaryBrush", vmPage);
+    }
+
+    private static void HostIconsUsePackagedGlyph()
+    {
+        string root = FindRepositoryRoot();
+        string mainWindow = File.ReadAllText(Path.Combine(root, "src", "Views", "Windows", "MainWindow.xaml"));
+        string hostPage = File.ReadAllText(Path.Combine(root, "src", "Views", "Pages", "HostConnectionPage.xaml"));
+        string hostViewModel = File.ReadAllText(Path.Combine(root, "src", "ViewModels", "HostConnectionPageViewModel.cs"));
+
+        string hostNavigation = Slice(mainWindow, "Content=\"主机连接\"", "</ui:NavigationViewItem>");
+        TestAssert.Contains("Symbol=\"Desktop24\"", hostNavigation);
+        TestAssert.Contains("Symbol=\"{Binding SelectedHost.Icon}\"", hostPage);
+        TestAssert.Contains("public string Icon => \"Desktop24\";", hostViewModel);
+
+        string hostIconSources = string.Concat(hostNavigation, hostPage, hostViewModel);
+        TestAssert.False(hostIconSources.Contains("Server24", StringComparison.Ordinal),
+            "Server24 is absent from the packaged subset font and renders as an empty icon.");
     }
 
     private static void AzureLeasePreservesRemotePowerRouting()

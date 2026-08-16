@@ -965,7 +965,7 @@ public partial class HostProfileListItemViewModel : ObservableObject
     public HostProfile? Profile { get; }
     public string DisplayName { get; }
     public string Address { get; }
-    public string Icon => Profile is null ? "Desktop24" : "Server24";
+    public string Icon => "Desktop24";
 
     public static HostProfileListItemViewModel Local(string computerName) =>
         new(null, "本地计算机", computerName, "已连接", UiStatusBrushes.Success);
