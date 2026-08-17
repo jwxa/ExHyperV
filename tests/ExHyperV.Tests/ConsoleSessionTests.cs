@@ -14,7 +14,10 @@ internal static class ConsoleSessionTests
         ("Console_StaleHostDataRejectsCapture", StaleHostDataRejectsCapture),
         ("Console_InvalidVmIdRejectsCapture", InvalidVmIdRejectsCapture),
         ("Console_SameVmIdIsScopedByHost", SameVmIdIsScopedByHost),
-        ("Console_UnexpectedDisconnectReportsConnectionLoss", UnexpectedDisconnectReportsConnectionLoss)
+        ("Console_UnexpectedDisconnectReportsConnectionLoss", UnexpectedDisconnectReportsConnectionLoss),
+        ("Console_MultiMonitorLaunchFlowIsWired", MultiMonitorLaunchFlowIsWired),
+        ("Console_MultiMonitorSettingsAreAppliedBeforeConnect", MultiMonitorSettingsAreAppliedBeforeConnect),
+        ("Console_MultiMonitorAvoidsSingleDisplayNegotiation", MultiMonitorAvoidsSingleDisplayNegotiation)
     ];
 
     private static void LocalCaptureUsesLocalhost2179()
@@ -137,6 +140,105 @@ internal static class ConsoleSessionTests
         TestAssert.Contains("HostSessions.Registry", windowSource);
         TestAssert.Contains("_session.Target.IsLocal", viewModelSource);
         TestAssert.Contains("_sessionRegistry.ReportConnectionLoss(_session.Stamp, reason)", viewModelSource);
+    }
+
+    private static void MultiMonitorLaunchFlowIsWired()
+    {
+        string root = FindRepositoryRoot();
+        string displayModeSource = File.ReadAllText(Path.Combine(
+            root, "src", "Interaction", "ConsoleDisplayMode.cs"));
+        string dialogsSource = File.ReadAllText(Path.Combine(
+            root, "src", "Interaction", "Dialogs.cs"));
+        string navigationSource = File.ReadAllText(Path.Combine(
+            root, "src", "Interaction", "Navigation.cs"));
+        string pageSource = File.ReadAllText(Path.Combine(
+            root, "src", "ViewModels", "VirtualMachinesPageViewModel.cs"));
+
+        TestAssert.Contains("SingleMonitor", displayModeSource);
+        TestAssert.Contains("AllMonitors", displayModeSource);
+        TestAssert.Contains("Task<ConsoleDisplayMode?> ShowConsoleDisplayModeSelectionAsync()", dialogsSource);
+        TestAssert.Contains("DialogWidth = 480", dialogsSource);
+        TestAssert.Contains("ContentDialogResult.Secondary => ConsoleDisplayMode.SingleMonitor", dialogsSource);
+        TestAssert.Contains("ContentDialogResult.Primary => ConsoleDisplayMode.AllMonitors", dialogsSource);
+        TestAssert.Contains("bool TryActivateConsoleWindow(HostConsoleSession session)", navigationSource);
+        TestAssert.Contains("new ConsoleWindow(session, displayMode)", navigationSource);
+
+        int activate = pageSource.IndexOf("Navigation.TryActivateConsoleWindow(session)", StringComparison.Ordinal);
+        int prompt = pageSource.IndexOf("Dialogs.ShowConsoleDisplayModeSelectionAsync()", StringComparison.Ordinal);
+        int open = pageSource.IndexOf("Navigation.OpenConsoleWindow(session, displayMode.Value)", StringComparison.Ordinal);
+        TestAssert.True(activate >= 0 && prompt > activate && open > prompt,
+            "Existing console activation, display selection, and new-window opening are not ordered correctly.");
+        TestAssert.Contains("VmConsoleService.IsEnhancedSessionAvailableAsync", pageSource);
+        TestAssert.Contains("ConsoleDisplayMode_EnhancedRequired", pageSource);
+    }
+
+    private static void MultiMonitorSettingsAreAppliedBeforeConnect()
+    {
+        string root = FindRepositoryRoot();
+        string settingsSource = File.ReadAllText(Path.Combine(
+            root, "src", "Tools", "Controls", "RdpConnectionSettings.cs"));
+        string axHostSource = File.ReadAllText(Path.Combine(
+            root, "src", "Tools", "Controls", "MsRdpAxHost.cs"));
+        string clientHostSource = File.ReadAllText(Path.Combine(
+            root, "src", "Tools", "Controls", "RdpClientHost.cs"));
+
+        TestAssert.Contains("public bool UseAllMonitors", settingsSource);
+        int useMultimon = axHostSource.IndexOf("IMsRdpClientNonScriptable5", StringComparison.Ordinal);
+        int connect = axHostSource.IndexOf("rdp.Connect();", StringComparison.Ordinal);
+        TestAssert.True(useMultimon >= 0 && connect > useMultimon,
+            "UseMultimon must be applied before the RDP ActiveX Connect call.");
+        TestAssert.Contains("UseMultimon = s.UseAllMonitors", axHostSource);
+        TestAssert.Contains("adv.ContainerHandledFullScreen = 1", axHostSource);
+        TestAssert.False(axHostSource.Contains("s.UseAllMonitors ? 0 : 1", StringComparison.Ordinal),
+            "Multi-monitor must use the WPF container's virtual-desktop full-screen host.");
+        TestAssert.Contains("_startFullScreenOnConnect = s.UseAllMonitors", axHostSource);
+        TestAssert.Contains("BeginInvoke(new Action(() => StartFullScreenIfCurrent(generation)))", axHostSource);
+        TestAssert.Contains("generation != _connectionGeneration", axHostSource);
+        TestAssert.Contains("ConnectionState != 1", axHostSource);
+        TestAssert.Contains("_startFullScreenOnConnect = false", axHostSource);
+        TestAssert.Contains("RemoteMonitorCount", axHostSource);
+        TestAssert.Contains("RemoteMonitorLayoutMatchesLocal", axHostSource);
+        TestAssert.Contains("GetRemoteMonitorsBoundingBox", axHostSource);
+        TestAssert.Contains("HorizontalScrollBarVisible", axHostSource);
+        TestAssert.Contains("public bool SetFullScreen(bool fullScreen)", clientHostSource);
+    }
+
+    private static void MultiMonitorAvoidsSingleDisplayNegotiation()
+    {
+        string root = FindRepositoryRoot();
+        string windowSource = File.ReadAllText(Path.Combine(
+            root, "src", "Views", "Windows", "ConsoleWindow.xaml.cs"));
+        string viewModelSource = File.ReadAllText(Path.Combine(
+            root, "src", "ViewModels", "ConsoleViewModel.cs"));
+
+        TestAssert.Contains("new ConsoleViewModel(session, _sessionRegistry, _useAllMonitors)", windowSource);
+        TestAssert.Contains("SystemInformation.VirtualScreen", windowSource);
+        TestAssert.Contains("DesktopWidth = useAllMonitors ? virtualScreen.Width", windowSource);
+        TestAssert.Contains("DesktopHeight = useAllMonitors ? virtualScreen.Height", windowSource);
+        TestAssert.Contains("UseAllMonitors = useAllMonitors", windowSource);
+        TestAssert.Contains("if (!_vm.IsEnhancedMode || _useAllMonitors) return;", windowSource);
+        TestAssert.Contains("FullScreenToggleRequested += OnFullScreenToggleRequested", windowSource);
+        TestAssert.Contains("RdpHost.ConnectionState != 1", windowSource);
+        TestAssert.Contains("FullScreenToggleRequested?.Invoke()", viewModelSource);
+        TestAssert.Contains("EnterMultiMonitorFullScreen", windowSource);
+        TestAssert.Contains("ExitMultiMonitorFullScreen", windowSource);
+        TestAssert.Contains("SetWindowPos", windowSource);
+        TestAssert.Contains("SWP_FRAMECHANGED", windowSource);
+        TestAssert.Contains("SystemInformation.VirtualScreen", windowSource);
+        TestAssert.Contains("GetWindowPlacement", windowSource);
+        TestAssert.Contains("SetWindowPlacement", windowSource);
+        TestAssert.Contains("WM_DPICHANGED", windowSource);
+        TestAssert.Contains("QueueMultiMonitorPlacementVerification", windowSource);
+        TestAssert.Contains("多显示器全屏边界校准失败", windowSource);
+        TestAssert.Contains("SetMultiMonitorFullScreenState(false)", windowSource);
+        TestAssert.Contains("generation != Volatile.Read(ref _rdpConnectionGeneration)", windowSource);
+        TestAssert.Contains("fullScreen && !applied", windowSource);
+        TestAssert.Contains("if (_isFullScreen && _useAllMonitors)", windowSource);
+        TestAssert.False(windowSource.Contains("CloseAfterMultimonFailureAsync", StringComparison.Ordinal),
+            "A transient enhanced-session failure must not close a multi-monitor console.");
+        TestAssert.Contains("if (_useAllMonitors) return;", windowSource);
+        TestAssert.Contains("_preferEnhanced = _useAllMonitors", viewModelSource);
+        TestAssert.Contains("CanChangeResolution => IsEnhancedMode && !_useAllMonitors", viewModelSource);
     }
 
     private static HostSessionRegistry ConnectedRegistry(

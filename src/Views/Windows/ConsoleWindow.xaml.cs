@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -8,6 +9,8 @@ using Wpf.Ui.Controls;
 using ExHyperV.Services;
 using ExHyperV.Tools;
 using ExHyperV.ViewModels;
+using ExHyperV.Interaction;
+using ExHyperV.Services.Logging;
 using ExHyperV.Services.Remote.Consoles;
 using ExHyperV.Services.Remote.Sessions;
 
@@ -35,11 +38,13 @@ namespace ExHyperV.Views
         private readonly HostConsoleSession _session;
         private readonly HostId _hostId;
         private readonly IHostSessionRegistry _sessionRegistry;
+        private readonly bool _useAllMonitors;
         private bool _isFullScreen;               // 供 WM_GETMINMAXINFO 判断最大化铺满显示器还是工作区
         private bool _syncingFs;                  // 防止 mstscax→VM→mstscax 全屏状态回灌
         private bool _weInitiatedDisconnect;      // 标记我方主动断开(模式切换/VM 停止)，以免被当作"非预期断开"
         private bool _reconnectPending;           // 模式切换：断开完成(OnDisconnected)后再连，避免立即连被 mstscax 拒
         private bool _enhancedConnecting;         // 本次连接是否在尝试增强会话——没连上就断 → 回退基本会话
+        private int _rdpConnectionGeneration;     // 丢弃上一代连接排队到 Dispatcher 的全屏请求
         private bool _pendingEnhancedInset;       // 切到增强后：连上(Connected)时把窗口放大一圈，立刻露出可抓取缩放边（增强复用基本分辨率时无 RemoteSizeChange，故挂在 Connected）
         private bool _userResizing;               // 用户进入移动/缩放循环(WM_ENTER..EXITSIZEMOVE 之间)——期间 RdpArea.SizeChanged 不协商
         private int _moveSizeStartWidth;           // 进入移动/缩放循环时的窗口物理宽度；退出时据此区分纯移动与真实改大小
@@ -50,12 +55,26 @@ namespace ExHyperV.Views
         private WindowStyle _origWindowStyle;                     // 全屏前的 WindowStyle，退出恢复
         private WindowBackdropType _origBackdrop;                 // 全屏前的背景类型(Mica)，退出恢复
         private System.Windows.Media.Brush? _origBackground;      // 全屏前的窗口底色，退出恢复
+        private WINDOWPLACEMENT _multiMonitorRestorePlacement;     // 包含正常/最大化/最小化及正常态恢复边界
+        private bool _multiMonitorRestoreValid;
+        private WindowStyle _multiMonitorRestoreStyle;
+        private ResizeMode _multiMonitorRestoreResizeMode;
+        private WindowBackdropType _multiMonitorRestoreBackdrop;
+        private System.Windows.Media.Brush? _multiMonitorRestoreBackground;
+        private bool _multiMonitorRestoreTopmost;
+        private bool _multiMonitorPlacementPending;
         private bool _closing;                                    // 用户经连接栏关闭：抑制断开后的自动重连（避免"复活"）
         private bool _topHookAdded;                                // 顶边缩放钩子是否已在 ContentRendered 注册（只挂一次）
 
         public ConsoleWindow(HostConsoleSession session)
+            : this(session, ConsoleDisplayMode.SingleMonitor)
+        {
+        }
+
+        public ConsoleWindow(HostConsoleSession session, ConsoleDisplayMode displayMode)
         {
             _session = session ?? throw new ArgumentNullException(nameof(session));
+            _useAllMonitors = displayMode == ConsoleDisplayMode.AllMonitors;
             _hostId = session.Stamp.ProfileId is Guid profileId
                 ? HostId.FromProfileId(profileId)
                 : HostId.Local;
@@ -63,7 +82,7 @@ namespace ExHyperV.Views
             if (!_sessionRegistry.CanUseConsole(session.Stamp))
                 throw new InvalidOperationException("所属宿主会话已改变，未打开旧会话控制台。");
 
-            _vm = new ConsoleViewModel(session, _sessionRegistry);
+            _vm = new ConsoleViewModel(session, _sessionRegistry, _useAllMonitors);
             this.DataContext = _vm;
             InitializeComponent();
             if (App.PerformanceMode)
@@ -87,11 +106,12 @@ namespace ExHyperV.Views
             this.Dispatcher.UnhandledException += OnDispatcherUnhandledException;
 
             _vm.SendCadRequested += OnSendCadRequested;
+            _vm.FullScreenToggleRequested += OnFullScreenToggleRequested;
             _vm.PropertyChanged += OnViewModelPropertyChanged;
             _vm.Polled += OnVmPolled;   // 每次状态轮询：让连接与 VM 运行状态一致（含断线/VM 重启后重连）
             _vm.ResolutionChangeRequested += (w, h) =>
             {
-                if (!_vm.IsEnhancedMode || w <= 0 || h <= 0) return;
+                if (_useAllMonitors || !_vm.IsEnhancedMode || w <= 0 || h <= 0) return;
                 _postLoginWidth = w;
                 _postLoginHeight = h;
                 SettingsService.SaveDefaultConsoleResolution(w, h); // 用户明确选择，立即保存；不等待来宾是否接受
@@ -119,38 +139,51 @@ namespace ExHyperV.Views
             }));
             RdpHost.LoginCompleted += () => Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (!_vm.IsEnhancedMode) return;
+                if (!_vm.IsEnhancedMode || _useAllMonitors) return;
                 int width = _postLoginWidth > 0 ? _postLoginWidth : _vm.InitialEnhancedWidth;
                 int height = _postLoginHeight > 0 ? _postLoginHeight : _vm.InitialEnhancedHeight;
                 if (width <= 0 || height <= 0) return;
                 _windowFollowsResolution = true;
                 RdpHost.Resize(width, height, GetDpiScale());
             }));
-            RdpHost.Disconnected += reason => Dispatcher.BeginInvoke(new Action(() =>
+            RdpHost.Disconnected += reason =>
             {
-                if (_weInitiatedDisconnect)
+                Interlocked.Increment(ref _rdpConnectionGeneration);
+                Dispatcher.BeginInvoke(new Action(() =>
                 {
-                    _weInitiatedDisconnect = false;
-                    if (_reconnectPending) { _reconnectPending = false; SyncConnection(forceReconnect: false); }   // 断完 → 重连
-                    return;
-                }
-                if (_enhancedConnecting)   // 增强会话没连上就断 → 回退基本会话（并把顶部开关切回）
-                {
-                    _enhancedConnecting = false;
-                    _vm.FallbackToBasicSession();   // 触发 IsEnhancedMode 变化 → SyncConnection 以基本会话重连
-                    return;
-                }
-                if (reason == 1)   // reason=1=本地主动断开，且非我方发起(weInit)/非增强探测 → 用户点了连接栏关闭按钮，关闭控制台（否则被轮询重连"复活"）
-                {
-                    if (_closing) return;   // 已在关闭流程(OnClosing 已置位):拆 mstscax 时断开会派发到这里,别再 Close() 否则 VerifyNotClosing 抛
-                    _closing = true;
-                    this.Close();
-                    return;
-                }
-                // VM 停止 / 掉线：保持窗口、黑布盖住（RdpClientHost 在断开时自动盖布）；由状态轮询在 VM 运行时自动重连。
-                // 关闭控制台由用户点窗口关闭按钮完成（不从断开推断，避免 VM 停止误关）。
-                _ = _vm.ReportUnexpectedConnectionLossAsync($"远程控制台连接意外中断，RDP reason={reason}。");
-            }));
+                    if (_useAllMonitors && (_vm.IsFullScreen || _isFullScreen))
+                        SetMultiMonitorFullScreenState(false);
+
+                    if (_weInitiatedDisconnect)
+                    {
+                        _weInitiatedDisconnect = false;
+                        if (_reconnectPending) { _reconnectPending = false; SyncConnection(forceReconnect: false); }   // 断完 → 重连
+                        return;
+                    }
+                    if (_enhancedConnecting)   // 增强会话没连上就断 → 回退基本会话（并把顶部开关切回）
+                    {
+                        _enhancedConnecting = false;
+                        if (_useAllMonitors)
+                        {
+                            // VM 重启后 WMI 可能先报告增强会话可用，而来宾 RDP 端点仍在启动。
+                            // 保留窗口，等待下一次状态轮询重试，避免一次短暂失败破坏自动重连。
+                            return;
+                        }
+                        _vm.FallbackToBasicSession();   // 触发 IsEnhancedMode 变化 → SyncConnection 以基本会话重连
+                        return;
+                    }
+                    if (reason == 1)   // reason=1=本地主动断开，且非我方发起(weInit)/非增强探测 → 用户点了连接栏关闭按钮，关闭控制台（否则被轮询重连"复活"）
+                    {
+                        if (_closing) return;   // 已在关闭流程(OnClosing 已置位):拆 mstscax 时断开会派发到这里,别再 Close() 否则 VerifyNotClosing 抛
+                        _closing = true;
+                        this.Close();
+                        return;
+                    }
+                    // VM 停止 / 掉线：保持窗口、黑布盖住（RdpClientHost 在断开时自动盖住）；由状态轮询在 VM 运行时自动重连。
+                    // 关闭控制台由用户点窗口关闭按钮完成（不从断开推断，避免 VM 停止误关）。
+                    _ = _vm.ReportUnexpectedConnectionLossAsync($"远程控制台连接意外中断，RDP reason={reason}。");
+                }));
+            };
             RdpHost.FatalError += code => Dispatcher.BeginInvoke(new Action(() =>
             {
                 System.Diagnostics.Debug.WriteLine($"[Rdp] 致命错误 code={code}");   // 黑布由 RdpClientHost 在断开时自动盖住，等轮询重连
@@ -159,6 +192,7 @@ namespace ExHyperV.Views
             }));
             RdpHost.RemoteSizeChanged += (w, h) => Dispatcher.BeginInvoke(new Action(() =>
             {
+                if (_useAllMonitors) return;
                 _vm.CurrentWidth = w; _vm.CurrentHeight = h;
                 if (w == _postLoginWidth && h == _postLoginHeight)
                     _postLoginWidth = _postLoginHeight = 0;
@@ -174,10 +208,23 @@ namespace ExHyperV.Views
                 }
                 LayoutRdpHost();
             }));
-            RdpHost.FullScreenRequested += fs => Dispatcher.BeginInvoke(new Action(() =>
+            RdpHost.FullScreenRequested += fs =>
             {
-                _syncingFs = true; _vm.IsFullScreen = fs; _syncingFs = false;   // 源自 mstscax 热键，只反映到 VM，不回灌（画面分辨率由 RdpArea.SizeChanged 协商）
-            }));
+                int generation = Volatile.Read(ref _rdpConnectionGeneration);
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (_closing
+                        || generation != Volatile.Read(ref _rdpConnectionGeneration)
+                        || RdpHost.ConnectionState != 1)
+                        return;
+                    if (_useAllMonitors)
+                    {
+                        SetMultiMonitorFullScreenState(fs);
+                        return;
+                    }
+                    _syncingFs = true; _vm.IsFullScreen = fs; _syncingFs = false;   // 源自 mstscax 热键，只反映到 VM，不回灌（画面分辨率由 RdpArea.SizeChanged 协商）
+                }));
+            };
             RdpHost.MinimizeRequested += () => Dispatcher.BeginInvoke(new Action(() => this.WindowState = WindowState.Minimized));
             RdpHost.CloseRequested += () => Dispatcher.BeginInvoke(new Action(() => { if (_closing) return; _closing = true; this.Close(); }));
 
@@ -185,6 +232,7 @@ namespace ExHyperV.Views
             // 拖动改大小期间(_userResizing)不在此协商（避免每像素刷新 mstscax），拖完由 WM_EXITSIZEMOVE 协商一次。
             RdpArea.SizeChanged += (s, e) =>
             {
+                if (_useAllMonitors) return;
                 LayoutRdpHost();
                 if (_vm.IsEnhancedMode && !_userResizing && !_windowFollowsResolution && !_pendingEnhancedInset && _vm.CurrentWidth > 0) NegotiateResolution();
             };
@@ -210,7 +258,7 @@ namespace ExHyperV.Views
         // 增强 + 窗口化时，窗口顶部 TopResizeGrip 像素内 → HTTOP，使顶边可上下拉动改分辨率（底边被任务栏盖住时的退路）。
         private IntPtr TopResizeHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
-            if (msg == WM_NCHITTEST && _vm.IsEnhancedMode && !_vm.IsFullScreen)
+            if (msg == WM_NCHITTEST && !_useAllMonitors && _vm.IsEnhancedMode && !_vm.IsFullScreen)
             {
                 int y = (short)((lParam.ToInt64() >> 16) & 0xFFFF);
                 if (GetWindowRect(hwnd, out RECT r) && y >= r.Top && y < r.Top + TopResizeGrip)
@@ -238,6 +286,15 @@ namespace ExHyperV.Views
             }));
         }
 
+        private void OnFullScreenToggleRequested()
+        {
+            if (!_useAllMonitors || _closing || RdpHost.ConnectionState != 1) return;
+
+            // 只向 mstscax 请求切换；窗口状态等待 OnRequestGo/LeaveFullScreen 确认，
+            // COM 拒绝请求时不会折叠标题栏形成“伪全屏”。
+            RdpHost.SetFullScreen(!_vm.IsFullScreen);
+        }
+
         void IHostConsoleWindow.Activate()
         {
             if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
@@ -254,12 +311,18 @@ namespace ExHyperV.Views
                     // ZoomLevel 会和动态分辨率打架(画面不随分辨率刷新+灰信箱)，故归零只能在断开重连之前做、之后绝不碰。
                     // 仅在已连接的基本会话切换到增强会话时重置缩放。
                     if (_vm.IsEnhancedMode && RdpHost.ConnectionState != 0) RdpHost.SetZoomLevel(100);
-                    _pendingEnhancedInset = _vm.IsEnhancedMode;      // 进入增强：连上后放大窗口露出可抓取边
+                    _pendingEnhancedInset = _vm.IsEnhancedMode && !_useAllMonitors;      // 进入增强：连上后放大窗口露出可抓取边
                     SyncConnection(forceReconnect: true);            // 换 PCB，须断后重连
-                    if (!_vm.IsFullScreen) ApplyWindowedLayout();
+                    if (!_vm.IsFullScreen && !_useAllMonitors) ApplyWindowedLayout();
                     break;
 
                 case nameof(ConsoleViewModel.IsFullScreen):
+                    if (_useAllMonitors)
+                    {
+                        // 多监视器状态只由 mstscax 的容器全屏请求更新；按钮请求走
+                        // FullScreenToggleRequested，避免属性变化再次回灌 COM。
+                        break;
+                    }
                     if (_vm.IsFullScreen) EnterFullScreen(); else ExitFullScreen();  // 窗口
                     // 进全屏：必须在 mstscax 进入全屏(SetFullScreen)之前把缩放归 100。连接栏的布局只在"进全屏那一刻"计算，
                     // 若此刻 ZoomLevel≠100，连接栏会按缩放态布局而消失、退不出去；事后再设 100 也救不回。退全屏不在此动(由 ApplyBasicZoom 还原档)。
@@ -271,7 +334,7 @@ namespace ExHyperV.Views
 
                 case nameof(ConsoleViewModel.CurrentWidth):
                 case nameof(ConsoleViewModel.CurrentHeight):
-                    if (!_vm.IsEnhancedMode) ApplyBasicZoom();   // 基本会话：窗口跟随 VM 分辨率 × 当前缩放档（增强靠下拉/拖动两条专属路径）
+                    if (!_useAllMonitors && !_vm.IsEnhancedMode) ApplyBasicZoom();   // 基本会话：窗口跟随 VM 分辨率 × 当前缩放档（增强靠下拉/拖动两条专属路径）
                     break;
 
                 case nameof(ConsoleViewModel.SelectedZoom):
@@ -302,20 +365,43 @@ namespace ExHyperV.Views
                 return;
             }
 
+            // “使用所有监视器”只能由增强会话兑现。预检通常已保证可用；若来宾状态在此期间变化，
+            // 保持未连接而不静默降级到单屏基本会话。
+            if (_useAllMonitors && (!_vm.IsEnhancedMode || !_vm.IsEnhancedAvailable))
+            {
+                if (RdpHost.ConnectionState != 0)
+                {
+                    _weInitiatedDisconnect = true;
+                    RdpHost.Disconnect();
+                }
+                return;
+            }
+
             if (_vm.IsRunning)
             {
                 if (RdpHost.ConnectionState == 0)   // 该连而未连（force+已连的已在上面断开并挂起重连）
                 {
-                    _enhancedConnecting = _vm.IsEnhancedMode;   // 记下本次是否在尝试增强（失败则回退基本）
+                    _enhancedConnecting = _vm.IsEnhancedMode;   // 记下本次是否在尝试增强（单屏失败回退，多屏等待重试）
                     uint desktopScale = (uint)Math.Clamp(Math.Round(GetDpiScale() * 100.0), 100, 500);
-                    int initialWidth = _vm.IsEnhancedMode ? _vm.InitialEnhancedWidth : _vm.CurrentWidth;
-                    int initialHeight = _vm.IsEnhancedMode ? _vm.InitialEnhancedHeight : _vm.CurrentHeight;
-                    if (_vm.IsEnhancedMode)
+                    int initialWidth = _vm.IsEnhancedMode && !_useAllMonitors
+                        ? _vm.InitialEnhancedWidth
+                        : _vm.CurrentWidth;
+                    int initialHeight = _vm.IsEnhancedMode && !_useAllMonitors
+                        ? _vm.InitialEnhancedHeight
+                        : _vm.CurrentHeight;
+                    if (_vm.IsEnhancedMode && !_useAllMonitors)
                     {
                         _postLoginWidth = initialWidth;
                         _postLoginHeight = initialHeight;
                     }
-                    RdpHost.Connect(BuildHyperVSettings(_session, _vm.IsEnhancedMode, initialWidth, initialHeight, desktopScale));
+                    Interlocked.Increment(ref _rdpConnectionGeneration);
+                    RdpHost.Connect(BuildHyperVSettings(
+                        _session,
+                        _vm.IsEnhancedMode,
+                        initialWidth,
+                        initialHeight,
+                        desktopScale,
+                        _useAllMonitors));
                 }
             }
             else if (RdpHost.ConnectionState != 0)   // VM 停了但还连着 → 断（保持窗口，等轮询到 VM 重启再连）
@@ -326,9 +412,16 @@ namespace ExHyperV.Views
         }
 
         // Hyper-V 控制台连接配方（消费层组装；增强沿用当前分辨率作初始尺寸，避免切换跳变）。
-        private static RdpConnectionSettings BuildHyperVSettings(HostConsoleSession session, bool enhanced, int reuseWidth, int reuseHeight, uint desktopScale)
+        private static RdpConnectionSettings BuildHyperVSettings(
+            HostConsoleSession session,
+            bool enhanced,
+            int reuseWidth,
+            int reuseHeight,
+            uint desktopScale,
+            bool useAllMonitors = false)
         {
             var id = session.VmId.ToString("D").ToUpperInvariant();
+            var virtualScreen = System.Windows.Forms.SystemInformation.VirtualScreen;
             return new RdpConnectionSettings
             {
                 Server = session.Server,
@@ -341,15 +434,239 @@ namespace ExHyperV.Views
                 DisableCredentialsDelegation = true,
                 FullScreenHotKeyVirtualKey = FullScreenHotKeyVk,   // mstscax 自带全屏热键(Ctrl+Alt+Enter)；非 100% 缩放下其 guard 会挡住、无热键全屏(接受)
                 ConnectionTimeoutSeconds = ConnectTimeoutSeconds,
-                DesktopWidth = enhanced ? reuseWidth : 0,
-                DesktopHeight = enhanced ? reuseHeight : 0,
-                DesktopScaleFactor = enhanced ? desktopScale : 100,
+                // UseMultimon 发送逐显示器拓扑；初始桌面尺寸显式使用虚拟桌面联合边界，
+                // 避免 0 回落成 1100x820 的嵌入控件尺寸并产生横向滚动条。
+                DesktopWidth = useAllMonitors ? virtualScreen.Width : enhanced ? reuseWidth : 0,
+                DesktopHeight = useAllMonitors ? virtualScreen.Height : enhanced ? reuseHeight : 0,
+                DesktopScaleFactor = enhanced && !useAllMonitors ? desktopScale : 100,
                 DeviceScaleFactor = 100,
                 PreConnectionBlob = enhanced ? $"{id};EnhancedMode=1" : id,
+                UseAllMonitors = useAllMonitors,
             };
         }
 
         // ── 全屏 / 窗口尺寸 ─────────────────────────────────────────────────
+        private void SetMultiMonitorFullScreenState(bool fullScreen)
+        {
+            bool applied = fullScreen
+                ? EnterMultiMonitorFullScreen()
+                : ExitMultiMonitorFullScreen();
+            if (fullScreen && !applied && !_closing && RdpHost.ConnectionState == 1)
+                RdpHost.SetFullScreen(false);
+            bool state = fullScreen && applied;
+            _syncingFs = true;
+            _vm.IsFullScreen = state;
+            _syncingFs = false;
+        }
+
+        private bool EnterMultiMonitorFullScreen()
+        {
+            if (!_useAllMonitors || _isFullScreen) return _isFullScreen;
+            if (_closing || RdpHost.ConnectionState != 1) return false;
+
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            var virtualScreen = System.Windows.Forms.SystemInformation.VirtualScreen;
+            _multiMonitorRestorePlacement = new WINDOWPLACEMENT
+            {
+                Length = (uint)Marshal.SizeOf<WINDOWPLACEMENT>()
+            };
+            if (hwnd == IntPtr.Zero
+                || virtualScreen.Width <= 0
+                || virtualScreen.Height <= 0
+                || !GetWindowPlacement(hwnd, ref _multiMonitorRestorePlacement))
+            {
+                AppLog.Warning("RDP 控制台", "无法取得多显示器全屏所需的窗口边界。",
+                    ConsoleLogContext(new Dictionary<string, object?>
+                    {
+                        ["VirtualBounds"] = FormatRect(
+                            virtualScreen.Left,
+                            virtualScreen.Top,
+                            virtualScreen.Right,
+                            virtualScreen.Bottom),
+                    }));
+                return false;
+            }
+
+            _multiMonitorRestoreValid = true;
+            _multiMonitorRestoreStyle = WindowStyle;
+            _multiMonitorRestoreResizeMode = ResizeMode;
+            _multiMonitorRestoreBackdrop = WindowBackdropType;
+            _multiMonitorRestoreBackground = Background;
+            _multiMonitorRestoreTopmost = Topmost;
+
+            _isFullScreen = true;
+            if (WindowState != WindowState.Normal) WindowState = WindowState.Normal;
+            WindowBackdropType = WindowBackdropType.None;
+            Background = System.Windows.Media.Brushes.Black;
+            WindowStyle = WindowStyle.None;
+            ResizeMode = ResizeMode.NoResize;
+            Topmost = true;
+
+            uint noBorder = DWMWA_COLOR_NONE;
+            DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref noBorder, sizeof(uint));
+            bool positioned = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                virtualScreen.Left,
+                virtualScreen.Top,
+                virtualScreen.Width,
+                virtualScreen.Height,
+                SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            if (!positioned)
+            {
+                int error = Marshal.GetLastWin32Error();
+                _isFullScreen = false;
+                RestoreMultiMonitorWindow(hwnd);
+                AppLog.Warning("RDP 控制台", "无法把控制台窗口铺到本机虚拟桌面。",
+                    ConsoleLogContext(new Dictionary<string, object?>
+                    {
+                        ["VirtualBounds"] = FormatRect(
+                            virtualScreen.Left,
+                            virtualScreen.Top,
+                            virtualScreen.Right,
+                            virtualScreen.Bottom),
+                        ["Win32Error"] = error,
+                    }));
+                return false;
+            }
+
+            QueueMultiMonitorPlacementVerification();
+
+            AppLog.Information("RDP 控制台", "控制台窗口已铺到所有本机显示器。",
+                ConsoleLogContext(new Dictionary<string, object?>
+                {
+                    ["LocalMonitorCount"] = System.Windows.Forms.Screen.AllScreens.Length,
+                    ["VirtualBounds"] = FormatRect(
+                        virtualScreen.Left,
+                        virtualScreen.Top,
+                        virtualScreen.Right,
+                        virtualScreen.Bottom),
+                    ["Monitors"] = string.Join("; ", System.Windows.Forms.Screen.AllScreens.Select(
+                        screen => $"{screen.DeviceName}:{FormatRect(screen.Bounds.Left, screen.Bounds.Top, screen.Bounds.Right, screen.Bounds.Bottom)}")),
+                }));
+            Dispatcher.BeginInvoke(
+                new Action(() => RdpHost.ReportMultiMonitorState("容器已铺满本机虚拟桌面")),
+                System.Windows.Threading.DispatcherPriority.Background);
+            return true;
+        }
+
+        private void QueueMultiMonitorPlacementVerification()
+        {
+            if (_multiMonitorPlacementPending || !_useAllMonitors || !_isFullScreen) return;
+            _multiMonitorPlacementPending = true;
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    if (_closing || !_isFullScreen || RdpHost.ConnectionState != 1) return;
+
+                    IntPtr hwnd = new WindowInteropHelper(this).Handle;
+                    var virtualScreen = System.Windows.Forms.SystemInformation.VirtualScreen;
+                    bool positioned = hwnd != IntPtr.Zero && SetWindowPos(
+                        hwnd,
+                        HWND_TOPMOST,
+                        virtualScreen.Left,
+                        virtualScreen.Top,
+                        virtualScreen.Width,
+                        virtualScreen.Height,
+                        SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+                    bool boundsMatch = positioned
+                        && GetWindowRect(hwnd, out RECT actual)
+                        && actual.Left == virtualScreen.Left
+                        && actual.Top == virtualScreen.Top
+                        && actual.Right == virtualScreen.Right
+                        && actual.Bottom == virtualScreen.Bottom;
+                    if (!boundsMatch)
+                    {
+                        int error = positioned ? 0 : Marshal.GetLastWin32Error();
+                        string actualBounds = GetWindowRect(hwnd, out RECT current)
+                            ? FormatRect(current.Left, current.Top, current.Right, current.Bottom)
+                            : "unavailable";
+                        AppLog.Warning("RDP 控制台", "多显示器全屏边界校准失败。",
+                            ConsoleLogContext(new Dictionary<string, object?>
+                            {
+                                ["ExpectedBounds"] = FormatRect(
+                                    virtualScreen.Left,
+                                    virtualScreen.Top,
+                                    virtualScreen.Right,
+                                    virtualScreen.Bottom),
+                                ["ActualBounds"] = actualBounds,
+                                ["Win32Error"] = error,
+                            }));
+                        SetMultiMonitorFullScreenState(false);
+                        if (!_closing && RdpHost.ConnectionState == 1)
+                            RdpHost.SetFullScreen(false);
+                        return;
+                    }
+
+                    RdpHost.ReportMultiMonitorState("多显示器全屏边界已校准");
+                }
+                finally
+                {
+                    _multiMonitorPlacementPending = false;
+                }
+            }), System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+        }
+
+        private bool ExitMultiMonitorFullScreen()
+        {
+            if (!_useAllMonitors || !_isFullScreen)
+            {
+                _isFullScreen = false;
+                return true;
+            }
+
+            _isFullScreen = false;
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            bool restored = RestoreMultiMonitorWindow(hwnd);
+            AppLog.Information("RDP 控制台", restored
+                    ? "已退出多显示器全屏并恢复控制台窗口。"
+                    : "已退出多显示器全屏，但恢复窗口位置失败。",
+                ConsoleLogContext(new Dictionary<string, object?>
+                {
+                    ["WindowRestored"] = restored,
+                }));
+            return true;
+        }
+
+        private bool RestoreMultiMonitorWindow(IntPtr hwnd)
+        {
+            if (!_multiMonitorRestoreValid || hwnd == IntPtr.Zero) return false;
+
+            uint defaultBorder = DWMWA_COLOR_DEFAULT;
+            DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref defaultBorder, sizeof(uint));
+            WindowState = WindowState.Normal;
+            WindowStyle = _multiMonitorRestoreStyle;
+            ResizeMode = _multiMonitorRestoreResizeMode;
+            Background = _multiMonitorRestoreBackground;
+            WindowBackdropType = _multiMonitorRestoreBackdrop;
+            Topmost = _multiMonitorRestoreTopmost;
+
+            bool frameRestored = SetWindowPos(
+                hwnd,
+                _multiMonitorRestoreTopmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            WINDOWPLACEMENT placement = _multiMonitorRestorePlacement;
+            placement.Length = (uint)Marshal.SizeOf<WINDOWPLACEMENT>();
+            bool placementRestored = SetWindowPlacement(hwnd, ref placement);
+            _multiMonitorRestoreValid = false;
+            return frameRestored && placementRestored;
+        }
+
+        private AppLogContext ConsoleLogContext(IReadOnlyDictionary<string, object?> properties) =>
+            new(
+                Host: _session.Target.DisplayName,
+                SessionGeneration: _session.Stamp.Generation,
+                Properties: properties,
+                HostId: _hostId);
+
+        private static string FormatRect(int left, int top, int right, int bottom) =>
+            $"({left},{top})-({right},{bottom}) {right - left}x{bottom - top}";
+
         private void EnterFullScreen()
         {
             _isFullScreen = true;
@@ -384,7 +701,7 @@ namespace ExHyperV.Views
 
         private void ApplyWindowedLayout()
         {
-            if (_vm.IsFullScreen) return;
+            if (_useAllMonitors || _vm.IsFullScreen) return;
             this.ResizeMode = ResizeMode.CanResize;   // 窗口化恒可调整大小（原生双击最大化/拖动/贴边依赖于此）
             // 基本：窗口=VM 分辨率。增强：窗口尺寸不在此处动——初次进入由 Connected(EnsureEnhancedResizeBorder) 放大留边；
             // 退出全屏由 WPF 还原到全屏前尺寸、再经 RdpArea.SizeChanged 重新协商分辨率恢复留边。
@@ -430,6 +747,7 @@ namespace ExHyperV.Views
         /// 显式比例的"放大"由 ApplyBasicZoom 改窗口尺寸实现；此处只把画面缩到画面区内（mstscax 是 airspace、无法滚动，故不溢出）。</summary>
         private void LayoutRdpHost()
         {
+            if (_useAllMonitors) return;
             if (_vm.IsFullScreen && _vm.IsEnhancedMode)
             {
                 // 增强全屏：画面已协商到显示器分辨率，宿主铺满。SmartSizing 必须关——否则从"最大化被吸附"态
@@ -591,6 +909,7 @@ namespace ExHyperV.Views
         /// <summary>增强会话：用户结束拖动窗口（WM_EXITSIZEMOVE）后，把当前画面区像素协商给 VM（桌面跟随窗口尺寸）。</summary>
         private void NegotiateResolution()
         {
+            if (_useAllMonitors) return;
             var src = PresentationSource.FromVisual(this);
             if (src?.CompositionTarget == null) return;
             double dpiX = GetDpiScale(), dpiY = dpiX;   // Win32 取真实 DPI，避开 TransformToDevice 首帧滞后成 100%
@@ -644,6 +963,9 @@ namespace ExHyperV.Views
             // 避免登录界面的固定分辨率或来宾拒绝请求后再次污染偏好。
             _rdpTornDown = true;
             _closing = true;            // 抑制断开后的自动重连
+            Interlocked.Increment(ref _rdpConnectionGeneration);
+            if (_isFullScreen && _useAllMonitors)
+                ExitMultiMonitorFullScreen();
             RdpHost.ShutdownAndDispose();
         }
 
@@ -653,6 +975,7 @@ namespace ExHyperV.Views
             _closing = true;
             if (!_rdpTornDown) { _rdpTornDown = true; RdpHost.ShutdownAndDispose(); }  // 兜底：OnClosing 未跑到时
             _vm.SendCadRequested -= OnSendCadRequested;
+            _vm.FullScreenToggleRequested -= OnFullScreenToggleRequested;
             _vm.PropertyChanged -= OnViewModelPropertyChanged;
             _vm.Polled -= OnVmPolled;
             _sessionRegistry.Changed -= OnHostRegistryChanged;
@@ -671,6 +994,7 @@ namespace ExHyperV.Views
         private const int TopResizeGrip = 10;   // 顶边缩放热区高度（物理像素）
         private const int WM_ENTERSIZEMOVE = 0x0231;
         private const int WM_EXITSIZEMOVE = 0x0232;
+        private const int WM_DPICHANGED = 0x02E0;
         private const int MONITOR_DEFAULTTONEAREST = 0x00000002;
         private const int DWMWA_BORDER_COLOR = 34;          // Win11：窗口边框颜色（全屏置 None 去白边）
         private const uint DWMWA_COLOR_NONE = 0xFFFFFFFE;   // 不画边框
@@ -678,12 +1002,14 @@ namespace ExHyperV.Views
 
         private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
+            if (msg == WM_DPICHANGED && _useAllMonitors && _isFullScreen)
+                QueueMultiMonitorPlacementVerification();
             if (msg == WM_NCHITTEST && _vm.IsFullScreen)
             {
                 handled = true;
                 return (IntPtr)HTCLIENT;   // 全屏：整窗算客户区，屏蔽缩放边 → 四周不可拖（TitleBar 全屏折叠、不竞争，本钩子结果即生效）
             }
-            if (msg == WM_GETMINMAXINFO && _isFullScreen)
+            if (msg == WM_GETMINMAXINFO && _isFullScreen && !_useAllMonitors)
             {
                 IntPtr monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
                 if (monitor != IntPtr.Zero)
@@ -742,12 +1068,41 @@ namespace ExHyperV.Views
         private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
         [StructLayout(LayoutKind.Sequential)]
         private struct MONITORINFO { public int cbSize; public RECT rcMonitor; public RECT rcWork; public int dwFlags; }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WINDOWPLACEMENT
+        {
+            public uint Length;
+            public uint Flags;
+            public uint ShowCmd;
+            public POINT MinPosition;
+            public POINT MaxPosition;
+            public RECT NormalPosition;
+        }
 
         [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, int dwFlags);
         [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
         [DllImport("user32.dll")] private static extern int GetSystemMetrics(int nIndex);
         private const int SM_CXSIZEFRAME = 32, SM_CYSIZEFRAME = 33, SM_CXPADDEDBORDER = 92;   // 最大化全屏纠正客户区内缩用
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);   // 顶边缩放命中测试取窗口顶坐标
+        private static readonly IntPtr HWND_TOPMOST = new(-1);
+        private static readonly IntPtr HWND_NOTOPMOST = new(-2);
+        private const uint SWP_NOSIZE = 0x0001;
+        private const uint SWP_NOMOVE = 0x0002;
+        private const uint SWP_FRAMECHANGED = 0x0020;
+        private const uint SWP_SHOWWINDOW = 0x0040;
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetWindowPos(
+            IntPtr hWnd,
+            IntPtr hWndInsertAfter,
+            int x,
+            int y,
+            int width,
+            int height,
+            uint flags);
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT placement);
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT placement);
         [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref uint value, int size);
         [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hWnd);
 

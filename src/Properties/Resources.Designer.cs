@@ -950,6 +950,51 @@ namespace ExHyperV.Properties {
                 return ResourceManager.GetString("ConsoleViewModel_EnhancedSession", resourceCulture);
             }
         }
+
+        /// <summary>
+        ///   查找类似 Choose console display mode 的本地化字符串。
+        /// </summary>
+        public static string ConsoleDisplayMode_Title {
+            get {
+                return ResourceManager.GetString("ConsoleDisplayMode_Title", resourceCulture);
+            }
+        }
+
+        /// <summary>
+        ///   查找类似 Choose which monitors to use for the virtual machine console. 的本地化字符串。
+        /// </summary>
+        public static string ConsoleDisplayMode_Message {
+            get {
+                return ResourceManager.GetString("ConsoleDisplayMode_Message", resourceCulture);
+            }
+        }
+
+        /// <summary>
+        ///   查找类似 Use all monitors 的本地化字符串。
+        /// </summary>
+        public static string ConsoleDisplayMode_AllMonitors {
+            get {
+                return ResourceManager.GetString("ConsoleDisplayMode_AllMonitors", resourceCulture);
+            }
+        }
+
+        /// <summary>
+        ///   查找类似 Use one monitor 的本地化字符串。
+        /// </summary>
+        public static string ConsoleDisplayMode_SingleMonitor {
+            get {
+                return ResourceManager.GetString("ConsoleDisplayMode_SingleMonitor", resourceCulture);
+            }
+        }
+
+        /// <summary>
+        ///   查找多监视器模式需要增强会话的提示文本。
+        /// </summary>
+        public static string ConsoleDisplayMode_EnhancedRequired {
+            get {
+                return ResourceManager.GetString("ConsoleDisplayMode_EnhancedRequired", resourceCulture);
+            }
+        }
         
         /// <summary>
         ///   查找类似 Start VM 的本地化字符串。

@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using ExHyperV.Services.Logging;
 using MSTSCLib;
 
 namespace ExHyperV.Tools
@@ -16,6 +18,12 @@ namespace ExHyperV.Tools
         private const string MsRdpClient9Clsid = "8b918b82-7985-4c24-89df-c33ad2bbfbcd";
         private bool _smartSizing;   // 当前 SmartSizing 状态缓存（SetSmartSizing 用，避免重复设值闪烁）
         private uint _zoomLevel;     // 当前 ZoomLevel% 缓存（SetZoomLevel 用，基本会话每次布局都会调，仅比例真变时才穿透 OCX）
+        private bool _startFullScreenOnConnect;
+        private int _connectionGeneration;
+        private bool _useAllMonitors;
+        private string _server = string.Empty;
+        private int _lastRemoteWidth;
+        private int _lastRemoteHeight;
 
         public event Action? Connected;
         public event Action? LoginCompleted;
@@ -36,13 +44,45 @@ namespace ExHyperV.Tools
             {
                 var evt = (IMsTscAxEvents_Event)GetOcx();
                 // 每个处理都过 Safe()——COM 事件 sink 绝不能让异常逃回 native，否则 0xC000041D 进程秒退。
-                evt.OnConnected += () => Safe(() => Connected?.Invoke());
-                evt.OnLoginComplete += () => Safe(() => LoginCompleted?.Invoke());
-                evt.OnDisconnected += reason => Safe(() => Disconnected?.Invoke(reason));
-                evt.OnRemoteDesktopSizeChange += (w, h) => Safe(() => RemoteDesktopSizeChanged?.Invoke(w, h));
+                evt.OnConnected += () => Safe(() =>
+                {
+                    ReportMultiMonitorState("RDP 传输连接完成");
+                    // FullScreen 只能在控件已连接后设置；延迟到本次 COM 回调返回，
+                    // 避免在 OnConnected 的 native 事件栈内切换顶层窗口。
+                    if (_startFullScreenOnConnect)
+                    {
+                        int generation = _connectionGeneration;
+                        BeginInvoke(new Action(() => StartFullScreenIfCurrent(generation)));
+                    }
+                    Connected?.Invoke();
+                });
+                evt.OnLoginComplete += () => Safe(() =>
+                {
+                    ReportMultiMonitorState("RDP 登录完成");
+                    LoginCompleted?.Invoke();
+                });
+                evt.OnDisconnected += reason => Safe(() =>
+                {
+                    unchecked { _connectionGeneration++; }
+                    _lastRemoteWidth = _lastRemoteHeight = 0;
+                    Disconnected?.Invoke(reason);
+                });
+                evt.OnRemoteDesktopSizeChange += (w, h) => Safe(() =>
+                {
+                    ReportMultiMonitorRemoteSize(w, h);
+                    RemoteDesktopSizeChanged?.Invoke(w, h);
+                });
                 // 容器处理全屏：热键/请求经 OnRequestGo/LeaveFullScreen（非 OnEnter/Leave，那是控件自身全屏才触发）
-                evt.OnRequestGoFullScreen += () => Safe(() => EnteredFullScreen?.Invoke());
-                evt.OnRequestLeaveFullScreen += () => Safe(() => LeftFullScreen?.Invoke());
+                evt.OnRequestGoFullScreen += () => Safe(() =>
+                {
+                    LogFullScreenRequest(true);
+                    EnteredFullScreen?.Invoke();
+                });
+                evt.OnRequestLeaveFullScreen += () => Safe(() =>
+                {
+                    LogFullScreenRequest(false);
+                    LeftFullScreen?.Invoke();
+                });
                 evt.OnFatalError += code => Safe(() => FatalError?.Invoke(code));
                 // 容器处理全屏下，连接栏的最小化/关闭按钮经事件交给容器（窗口）处理
                 evt.OnRequestContainerMinimize += () => Safe(() => MinimizeRequested?.Invoke());
@@ -58,6 +98,10 @@ namespace ExHyperV.Tools
         {
             try
             {
+                unchecked { _connectionGeneration++; }
+                _useAllMonitors = s.UseAllMonitors;
+                _server = s.Server;
+                _lastRemoteWidth = _lastRemoteHeight = 0;
                 dynamic rdp = GetOcx();
                 rdp.Server = s.Server;
 
@@ -124,9 +168,41 @@ namespace ExHyperV.Tools
                     TrySet("singleConnectionTimeout", () => adv.singleConnectionTimeout = s.ConnectionTimeoutSeconds);
                     TrySet("overallConnectionTimeout", () => adv.overallConnectionTimeout = s.ConnectionTimeoutSeconds);
                 }
-                // 全屏与键鼠捕获（mstscax 原生）：容器处理全屏 → 热键时 fire OnRequestGo/LeaveFullScreen，由窗口全屏；
+                // UseMultimon 负责协议层的监视器拓扑；WPF 容器负责把唯一的 ActiveX 表面
+                // 精确铺到本机虚拟桌面。WindowsFormsHost 下依赖 mstscax 自建原生全屏窗口
+                // 会留下嵌入窗口，最终表现为单屏里的超宽桌面和横向滚动条。
+                var nonScriptable5 = (IMsRdpClientNonScriptable5)GetOcx();
+                bool useMultimonSet = TrySet("UseMultimon", () =>
+                    nonScriptable5.UseMultimon = s.UseAllMonitors);
+                bool useMultimonApplied = TryGet("UseMultimon", () => nonScriptable5.UseMultimon, false);
+                TrySet("ContainerHandledFullScreen", () => adv.ContainerHandledFullScreen = 1);
+                _startFullScreenOnConnect = s.UseAllMonitors;
+
+                if (s.UseAllMonitors)
+                {
+                    var virtualScreen = SystemInformation.VirtualScreen;
+                    var properties = new Dictionary<string, object?>
+                    {
+                        ["Server"] = s.Server,
+                        ["UseMultimonSet"] = useMultimonSet,
+                        ["UseMultimonApplied"] = useMultimonApplied,
+                        ["LocalMonitorCount"] = Screen.AllScreens.Length,
+                        ["LocalVirtualBounds"] = FormatBounds(
+                            virtualScreen.Left,
+                            virtualScreen.Top,
+                            virtualScreen.Right,
+                            virtualScreen.Bottom),
+                        ["RequestedDesktop"] = $"{s.DesktopWidth}x{s.DesktopHeight}",
+                        ["ContainerHandledFullScreen"] = 1,
+                    };
+                    AppLog.Information("RDP 控制台", "正在建立多显示器会话。",
+                        new AppLogContext(Properties: properties));
+                    if (!useMultimonSet || !useMultimonApplied)
+                        AppLog.Error("RDP 控制台", "mstscax 未接受 UseMultimon，多显示器会话无法按预期工作。",
+                            new AppLogContext(Properties: properties));
+                }
+
                 // HotKeyFullScreen=可配置 vkey → Ctrl+Alt+<key>；KeyboardHookMode=1 → Win/Alt+Tab 等组合键只要画面有焦点就送 VM（窗口化也送，不止全屏；要切回宿主先点一下别处）。
-                TrySet("ContainerHandledFullScreen", () => adv.ContainerHandledFullScreen = 1);   // 容器(WPF 窗口)处理全屏；mstscax 自己全屏会开独立窗口、关掉后残留主窗口
                 TrySet("HotKeyFullScreen", () => adv.HotKeyFullScreen = s.FullScreenHotKeyVirtualKey);
                 TrySet("KeyboardHookMode", () => rdp.SecuredSettings.KeyboardHookMode = 1);
 
@@ -140,14 +216,26 @@ namespace ExHyperV.Tools
             catch (Exception ex)
             {
                 Debug.WriteLine("[Rdp] ApplyAndConnect 异常: " + ex);
+                AppLog.Error("RDP 控制台", "应用 RDP 连接参数失败。",
+                    new AppLogContext(Properties: new Dictionary<string, object?>
+                    {
+                        ["Server"] = s.Server,
+                        ["UseAllMonitors"] = s.UseAllMonitors,
+                    }), ex);
             }
         }
 
         public void DisconnectSafe()
         {
+            // 先使 OnConnected 已排队的全屏回调失效；ShutdownAndDispose 会泵消息，
+            // 不能让旧回调在拆除 ActiveX 期间重新发起容器全屏请求。
+            _startFullScreenOnConnect = false;
+            unchecked { _connectionGeneration++; }
             try
             {
                 dynamic rdp = GetOcx();
+                if (_useAllMonitors && (int)rdp.Connected != 0 && (bool)rdp.FullScreen)
+                    SetFullScreen(false);
                 if ((int)rdp.Connected != 0) rdp.Disconnect();
             }
             catch { /* 未连接 / OCX 未就绪 */ }
@@ -160,11 +248,122 @@ namespace ExHyperV.Tools
         }
 
         /// <summary>同步控件全屏状态（容器处理全屏下，按钮发起的全屏需回灌，使 mstscax 内部状态/键盘捕获与窗口一致）。</summary>
-        public void SetFullScreen(bool fullScreen)
+        public bool SetFullScreen(bool fullScreen)
         {
-            try { dynamic rdp = GetOcx(); rdp.FullScreen = fullScreen; }
-            catch (Exception ex) { Debug.WriteLine("[Rdp] SetFullScreen 失败: " + ex.Message); }
+            try
+            {
+                var rdp = (IMsRdpClient9)GetOcx();
+                rdp.FullScreen = fullScreen;
+                bool applied = rdp.FullScreen == fullScreen;
+                if (_useAllMonitors && !applied)
+                    AppLog.Warning("RDP 控制台", "mstscax 未确认全屏状态变更。",
+                        MultiMonitorLogContext(new Dictionary<string, object?>
+                        {
+                            ["RequestedFullScreen"] = fullScreen,
+                            ["AppliedFullScreen"] = rdp.FullScreen,
+                        }));
+                return applied;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("[Rdp] SetFullScreen 失败: " + ex.Message);
+                if (_useAllMonitors)
+                    AppLog.Warning("RDP 控制台", "切换多显示器全屏失败。",
+                        MultiMonitorLogContext(new Dictionary<string, object?>
+                        {
+                            ["RequestedFullScreen"] = fullScreen,
+                        }), ex);
+                return false;
+            }
         }
+
+        private void StartFullScreenIfCurrent(int generation)
+        {
+            if (generation != _connectionGeneration
+                || !_startFullScreenOnConnect
+                || IsDisposed
+                || Disposing
+                || !IsHandleCreated
+                || ConnectionState != 1)
+                return;
+
+            SetFullScreen(true);
+            ReportMultiMonitorState("已请求容器多显示器全屏");
+        }
+
+        private void ReportMultiMonitorRemoteSize(int width, int height)
+        {
+            if (!_useAllMonitors || (width == _lastRemoteWidth && height == _lastRemoteHeight)) return;
+            _lastRemoteWidth = width;
+            _lastRemoteHeight = height;
+            AppLog.Information("RDP 控制台", "远端桌面尺寸已变化。",
+                MultiMonitorLogContext(new Dictionary<string, object?>
+                {
+                    ["RemoteDesktop"] = $"{width}x{height}",
+                }));
+        }
+
+        internal void ReportMultiMonitorState(string stage)
+        {
+            if (!_useAllMonitors) return;
+            try
+            {
+                var nonScriptable5 = (IMsRdpClientNonScriptable5)GetOcx();
+                var rdp = (IMsRdpClient9)GetOcx();
+                int left = 0, top = 0, right = 0, bottom = 0;
+                nonScriptable5.GetRemoteMonitorsBoundingBox(out left, out top, out right, out bottom);
+                var virtualScreen = SystemInformation.VirtualScreen;
+                AppLog.Information("RDP 控制台", stage,
+                    MultiMonitorLogContext(new Dictionary<string, object?>
+                    {
+                        ["UseMultimon"] = nonScriptable5.UseMultimon,
+                        ["RemoteMonitorCount"] = nonScriptable5.RemoteMonitorCount,
+                        ["RemoteMonitorLayoutMatchesLocal"] = nonScriptable5.RemoteMonitorLayoutMatchesLocal,
+                        ["RemoteMonitorBounds"] = FormatBounds(left, top, right, bottom),
+                        ["LocalMonitorCount"] = Screen.AllScreens.Length,
+                        ["LocalVirtualBounds"] = FormatBounds(
+                            virtualScreen.Left,
+                            virtualScreen.Top,
+                            virtualScreen.Right,
+                            virtualScreen.Bottom),
+                        ["FullScreen"] = rdp.FullScreen,
+                        ["Desktop"] = $"{rdp.DesktopWidth}x{rdp.DesktopHeight}",
+                        ["Control"] = $"{ClientSize.Width}x{ClientSize.Height}",
+                        ["HorizontalScrollBarVisible"] = rdp.HorizontalScrollBarVisible,
+                        ["VerticalScrollBarVisible"] = rdp.VerticalScrollBarVisible,
+                    }));
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warning("RDP 控制台", $"{stage}，但读取多显示器协商结果失败。",
+                    MultiMonitorLogContext(), ex);
+            }
+        }
+
+        private void LogFullScreenRequest(bool enter)
+        {
+            if (!_useAllMonitors) return;
+            AppLog.Information("RDP 控制台", enter ? "mstscax 请求进入多显示器全屏。" : "mstscax 请求退出多显示器全屏。",
+                MultiMonitorLogContext(new Dictionary<string, object?>
+                {
+                    ["Enter"] = enter,
+                }));
+        }
+
+        private AppLogContext MultiMonitorLogContext(
+            IReadOnlyDictionary<string, object?>? properties = null)
+        {
+            var merged = new Dictionary<string, object?> { ["Server"] = _server };
+            if (properties is not null)
+            {
+                foreach ((string key, object? value) in properties)
+                    merged[key] = value;
+            }
+            return new AppLogContext(Properties: merged);
+        }
+
+        private static string FormatBounds(int left, int top, int right, int bottom) =>
+            $"({left},{top})-({right},{bottom}) {right - left}x{bottom - top}";
 
         /// <summary>动态开关 SmartSizing（基本会话用：VM 分辨率超出画面区时开=缩放铺满，否则关=原生 1:1 清晰）。带缓存避免重复设值闪烁。</summary>
         public void SetSmartSizing(bool on)
@@ -212,10 +411,34 @@ namespace ExHyperV.Tools
             catch (Exception ex) { Debug.WriteLine("[Rdp] SetZoomLevel 失败: " + ex.Message); }
         }
 
-        private void TrySet(string what, Action set)
+        private bool TrySet(string what, Action set)
         {
-            try { set(); }
-            catch (Exception ex) { Debug.WriteLine($"[Rdp] 设 {what} 失败: {ex.GetType().Name} — {ex.Message}"); }
+            try
+            {
+                set();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[Rdp] 设 {what} 失败: {ex.GetType().Name} — {ex.Message}");
+                if (_useAllMonitors)
+                    AppLog.Warning("RDP 控制台", $"设置 RDP 参数 {what} 失败。",
+                        MultiMonitorLogContext(), ex);
+                return false;
+            }
+        }
+
+        private T TryGet<T>(string what, Func<T> get, T fallback)
+        {
+            try { return get(); }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[Rdp] 读 {what} 失败: {ex.GetType().Name} — {ex.Message}");
+                if (_useAllMonitors)
+                    AppLog.Warning("RDP 控制台", $"读取 RDP 参数 {what} 失败。",
+                        MultiMonitorLogContext(), ex);
+                return fallback;
+            }
         }
 
         // COM 事件处理的护栏：异常绝不能逃回 native 回调方（否则 0xC000041D 致命回调异常、进程秒退）。

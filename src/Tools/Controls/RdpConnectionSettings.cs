@@ -37,6 +37,12 @@ namespace ExHyperV.Tools
         public int ConnectionTimeoutSeconds { get; set; }
 
         /// <summary>
+        /// 使用宿主机的所有监视器。启用后 mstscax 协商远端监视器拓扑，
+        /// 宿主容器负责把控件铺到本机虚拟桌面；必须在 Connect 前设置。
+        /// </summary>
+        public bool UseAllMonitors { get; set; }
+
+        /// <summary>
         /// 全屏切换热键的虚拟键码（与 Ctrl+Alt 组合——mstscax 的 HotKeyFullScreen 固定带 Ctrl+Alt，只能配最后这个键）。
         /// 常用值：Enter=0x0D（默认）、Space=0x20、Break=0x03、Pause=0x13。
         /// </summary>

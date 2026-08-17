@@ -1104,20 +1104,26 @@ namespace ExHyperV.ViewModels
         private async Task OpenNativeConnectAsync()
         {
             if (!EnsureHostCapability(HostCapabilityKind.VmConsole)) return;
-            if (SelectedVm == null) return;
+            VmInstanceViewModel? selectedVm = SelectedVm;
+            if (selectedVm == null) return;
             HostConsoleSessionCapture capture = _hostConsoleSessions.Capture(
-                SelectedVm.HostId,
-                SelectedVm.Id.ToString(),
-                SelectedVm.Name);
+                selectedVm.HostId,
+                selectedVm.Id.ToString(),
+                selectedVm.Name);
             if (!capture.Succeeded)
             {
                 ShowTip(capture.Message);
                 return;
             }
 
+            HostConsoleSession session = capture.Session!;
+            // 同一 VM 的控制台窗口已经存在时，只前置现有连接；显示模式只能在建连前决定，
+            // 此时再次询问会给出无法生效的选择。
+            if (Navigation.TryActivateConsoleWindow(session)) return;
+
             // 已禁用控制台支持(无合成显示)的 VM：打开控制台只会黑屏/连不上，明确提示而非打开
-            if (capture.Session!.Target.IsLocal
-                && !await VmConsoleService.IsConsoleSupportEnabledAsync(SelectedVm.Name))
+            if (session.Target.IsLocal
+                && !await VmConsoleService.IsConsoleSupportEnabledAsync(selectedVm.Name))
             {
                 ShowTip(Properties.Resources.VmAdvanced_ConsoleDisabledHint);
                 return;
@@ -1125,8 +1131,33 @@ namespace ExHyperV.ViewModels
 
             try
             {
+                ConsoleDisplayMode? displayMode =
+                    await Dialogs.ShowConsoleDisplayModeSelectionAsync();
+                if (displayMode is null) return;
+
+                if (displayMode == ConsoleDisplayMode.AllMonitors)
+                {
+                    HostVmReadResult<bool> enhanced = await _hostOperationRouter.ReadAsync(
+                        session.HostId,
+                        (context, cancellationToken) =>
+                            VmConsoleService.IsEnhancedSessionAvailableAsync(selectedVm.Name, context),
+                        session.Stamp);
+                    if (!enhanced.Succeeded)
+                    {
+                        ShowTip(string.IsNullOrWhiteSpace(enhanced.Message)
+                            ? Properties.Resources.ConsoleDisplayMode_EnhancedRequired
+                            : enhanced.Message);
+                        return;
+                    }
+                    if (enhanced.Value != true)
+                    {
+                        ShowTip(Properties.Resources.ConsoleDisplayMode_EnhancedRequired);
+                        return;
+                    }
+                }
+
                 // 打开当前选中虚拟机的沉浸式控制台窗口（现走新的 RdpClientHost）
-                Navigation.OpenConsoleWindow(capture.Session);
+                Navigation.OpenConsoleWindow(session, displayMode.Value);
             }
             catch (Exception ex)
             {

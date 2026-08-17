@@ -150,7 +150,7 @@
                            Margin="8,0,0,0">
                             <ui:DropDownButton.Flyout>
                                 <ContextMenu>
-                                    <MenuItem Header="{x:Static properties:Resources.ConsoleViewModel_BasicSession}" Command="{Binding SwitchSessionModeCommand}" CommandParameter="{x:Static properties:Resources.ConsoleViewModel_BasicSession}" />
+                                    <MenuItem Header="{x:Static properties:Resources.ConsoleViewModel_BasicSession}" Command="{Binding SwitchSessionModeCommand}" CommandParameter="{x:Static properties:Resources.ConsoleViewModel_BasicSession}" IsEnabled="{Binding CanSelectBasicSession}" />
                                     <MenuItem Header="{x:Static properties:Resources.ConsoleViewModel_EnhancedSession}" Command="{Binding SwitchSessionModeCommand}" CommandParameter="{x:Static properties:Resources.ConsoleViewModel_EnhancedSession}" IsEnabled="{Binding IsEnhancedAvailable}" />
                                 </ContextMenu>
                             </ui:DropDownButton.Flyout>

@@ -31,7 +31,7 @@ namespace ExHyperV.Tools
         public event Action<int>? Disconnected;
         /// <summary>远端桌面尺寸变化（OnRemoteDesktopSizeChange）——取代旧实现 20ms 像素嗅探。</summary>
         public event Action<int, int>? RemoteSizeChanged;
-        /// <summary>RDP 控件自身请求进/出全屏（OnEnter/LeaveFullScreenMode）——取代旧实现键盘钩子轮询。</summary>
+        /// <summary>RDP 控件请求容器进/出全屏（OnRequestGo/LeaveFullScreen）。</summary>
         public event Action<bool>? FullScreenRequested;
         /// <summary>连接栏最小化按钮请求（容器处理全屏下）。</summary>
         public event Action? MinimizeRequested;
@@ -133,6 +133,9 @@ namespace ExHyperV.Tools
 
         /// <summary>同步全屏状态给底层控件（容器处理全屏时，按钮发起的全屏需要回灌给 mstscax，
         /// 使其内部状态/键盘捕获与窗口一致；热键发起的无需，由控件自身切换）。</summary>
-        public void SetFullScreen(bool fullScreen) => _ax.SetFullScreen(fullScreen);
+        public bool SetFullScreen(bool fullScreen) => _ax.SetFullScreen(fullScreen);
+
+        /// <summary>把当前多显示器协商结果和滚动条状态写入应用日志。</summary>
+        public void ReportMultiMonitorState(string stage) => _ax.ReportMultiMonitorState(stage);
     }
 }

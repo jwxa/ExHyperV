@@ -83,6 +83,47 @@ namespace ExHyperV.Interaction
             return result == ContentDialogResult.Primary;
         }
 
+        /// <summary>
+        /// 选择控制台使用的显示器范围；关闭对话框或无法显示时返回 null。
+        /// </summary>
+        public static async Task<ConsoleDisplayMode?> ShowConsoleDisplayModeSelectionAsync()
+        {
+            if (Application.Current?.MainWindow is not MainWindow mainWindow
+                || mainWindow.ContentPresenterForDialogs is not { } dialogHost)
+            {
+                return null;
+            }
+
+            var dialog = new ContentDialog
+            {
+                Title = Properties.Resources.ConsoleDisplayMode_Title,
+                // 三个中文按钮需要同时保留完整标签；默认 ContentDialog 宽度约 320 DIP，
+                // 会把“使用所有监视器/使用单个监视器”截断为省略号。
+                DialogWidth = 480,
+                Content = new TextBlock
+                {
+                    Text = Properties.Resources.ConsoleDisplayMode_Message,
+                    TextWrapping = TextWrapping.Wrap,
+                    FontSize = 14,
+                    LineHeight = 24
+                },
+                PrimaryButtonText = Properties.Resources.ConsoleDisplayMode_AllMonitors,
+                SecondaryButtonText = Properties.Resources.ConsoleDisplayMode_SingleMonitor,
+                CloseButtonText = Properties.Resources.Btn_Cancel,
+                PrimaryButtonAppearance = ControlAppearance.Primary,
+                SecondaryButtonAppearance = ControlAppearance.Secondary,
+                DialogHostEx = dialogHost
+            };
+
+            ContentDialogResult result = await dialog.ShowAsync(CancellationToken.None);
+            return result switch
+            {
+                ContentDialogResult.Primary => ConsoleDisplayMode.AllMonitors,
+                ContentDialogResult.Secondary => ConsoleDisplayMode.SingleMonitor,
+                _ => null
+            };
+        }
+
         // WPF-UI 的 Danger 外观按钮不设前景、继承 ButtonForeground(随主题)→ 亮色主题下红底黑字。
         // 弹窗加载后把可视树里 Danger 外观按钮前景强制刷白(红底恒可读)，对齐 XAML 里 Danger 按钮手写 Foreground="White"。
         public static void ForceDangerButtonWhiteForeground(FrameworkElement dialog)

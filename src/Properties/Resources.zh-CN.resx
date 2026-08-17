@@ -2217,6 +2217,21 @@
   <data name="ConsoleViewModel_EnhancedSession" xml:space="preserve">
     <value>增强会话</value>
   </data>
+  <data name="ConsoleDisplayMode_Title" xml:space="preserve">
+    <value>选择控制台显示模式</value>
+  </data>
+  <data name="ConsoleDisplayMode_Message" xml:space="preserve">
+    <value>请选择虚拟机控制台要使用的监视器。</value>
+  </data>
+  <data name="ConsoleDisplayMode_AllMonitors" xml:space="preserve">
+    <value>使用所有监视器</value>
+  </data>
+  <data name="ConsoleDisplayMode_SingleMonitor" xml:space="preserve">
+    <value>使用单个监视器</value>
+  </data>
+  <data name="ConsoleDisplayMode_EnhancedRequired" xml:space="preserve">
+    <value>使用所有监视器需要增强会话；当前虚拟机尚未提供增强会话，请改用单个监视器或稍后重试。</value>
+  </data>
   <data name="HostPageViewModel_DisablingHyperV" xml:space="preserve">
     <value>正在禁用 Hyper-V 组件...</value>
   </data>

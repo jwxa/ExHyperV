@@ -19,6 +19,7 @@ namespace ExHyperV.ViewModels
         private readonly HostId _hostId;
         private readonly IHostSessionRegistry _sessionRegistry;
         private readonly IHostOperationRouter _hostOperationRouter;
+        private readonly bool _useAllMonitors;
         private readonly CancellationTokenSource _lifetimeCts = new();
         private readonly CancellationToken _lifetimeToken;
         private DispatcherTimer _statusTimer = null!;
@@ -43,6 +44,8 @@ namespace ExHyperV.ViewModels
         private bool _canWriteToCapturedHost;
         public bool IsLocalHost => _session.Target.IsLocal;
         public bool IsCadAvailable => IsLocalHost && !IsEnhancedMode;
+        public bool UseAllMonitors => _useAllMonitors;
+        public bool CanSelectBasicSession => !_useAllMonitors;
         public int InitialEnhancedWidth { get; }
         public int InitialEnhancedHeight { get; }
         
@@ -68,10 +71,12 @@ namespace ExHyperV.ViewModels
 
         public ConsoleViewModel(
             HostConsoleSession session,
-            IHostSessionRegistry sessionRegistry)
+            IHostSessionRegistry sessionRegistry,
+            bool useAllMonitors = false)
         {
             _session = session ?? throw new ArgumentNullException(nameof(session));
             _sessionRegistry = sessionRegistry ?? throw new ArgumentNullException(nameof(sessionRegistry));
+            _useAllMonitors = useAllMonitors;
             _hostId = session.Stamp.ProfileId is Guid profileId
                 ? HostId.FromProfileId(profileId)
                 : HostId.Local;
@@ -86,7 +91,10 @@ namespace ExHyperV.ViewModels
             if (savedZoom == ZoomAutoToken) SelectedZoom = Properties.Resources.ConsoleWindow_ZoomAuto;
             else if (!string.IsNullOrEmpty(savedZoom) && ZoomOptions.Contains(savedZoom)) SelectedZoom = savedZoom;
             // 使用保存的分辨率直接建立增强会话；无保存值时先由基本会话取得分辨率。
-            _preferEnhanced = SettingsService.GetDefaultConnectionMode() == ModeEnhancedToken;
+            // 多监视器是增强会话能力；本次启动选项优先于保存的单/增强会话偏好，
+            // 但不写回全局设置，避免一次性显示选择改变后续控制台行为。
+            _preferEnhanced = _useAllMonitors
+                || SettingsService.GetDefaultConnectionMode() == ModeEnhancedToken;
             var savedResolution = SettingsService.GetDefaultConsoleResolution();
             InitialEnhancedWidth = savedResolution?.Width ?? DefaultEnhancedWidth;
             InitialEnhancedHeight = savedResolution?.Height ?? DefaultEnhancedHeight;
@@ -101,8 +109,23 @@ namespace ExHyperV.ViewModels
 
         [ObservableProperty] private bool _isFullScreen = false;
 
+        /// <summary>
+        /// 多监视器模式由 mstscax 发起容器全屏请求；命令只发出请求，
+        /// <see cref="IsFullScreen"/> 仅在收到容器进入/退出事件后更新。
+        /// </summary>
+        public event Action? FullScreenToggleRequested;
+
         [RelayCommand]
-        private void ToggleFullScreen() => IsFullScreen = !IsFullScreen;
+        private void ToggleFullScreen()
+        {
+            if (_useAllMonitors)
+            {
+                FullScreenToggleRequested?.Invoke();
+                return;
+            }
+
+            IsFullScreen = !IsFullScreen;
+        }
 
         // ===== 状态轮询 =====
 
@@ -351,6 +374,9 @@ namespace ExHyperV.ViewModels
         [RelayCommand]
         private void SwitchSessionMode(string mode)
         {
+            if (_useAllMonitors
+                && mode != Properties.Resources.ConsoleViewModel_EnhancedSession)
+                return;
             SelectedSessionMode = mode;
             _preferEnhanced = (mode == Properties.Resources.ConsoleViewModel_EnhancedSession);
             SettingsService.SaveDefaultConnectionMode(_preferEnhanced ? ModeEnhancedToken : ModeBasicToken);
@@ -367,7 +393,7 @@ namespace ExHyperV.ViewModels
             OnPropertyChanged(nameof(IsCadAvailable));
         }
 
-        public bool CanChangeResolution => IsEnhancedMode;
+        public bool CanChangeResolution => IsEnhancedMode && !_useAllMonitors;
 
 
         partial void OnIsRunningChanged(bool value)

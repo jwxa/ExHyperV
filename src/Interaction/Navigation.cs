@@ -18,14 +18,25 @@ namespace ExHyperV.Interaction
                 mw.RootNavigation.Navigate(pageType);
         }
 
+        /// <summary>若该 VM 已有控制台窗口则前置；返回是否找到并激活。</summary>
+        public static bool TryActivateConsoleWindow(HostConsoleSession session)
+        {
+            ArgumentNullException.ThrowIfNull(session);
+            return HostConsoleWindows.Registry.TryActivate(session.WindowKey);
+        }
+
+        /// <summary>以单显示器模式打开控制台（兼容未指定显示模式的调用方）。</summary>
+        public static void OpenConsoleWindow(HostConsoleSession session) =>
+            OpenConsoleWindow(session, ConsoleDisplayMode.SingleMonitor);
+
         /// <summary>打开虚拟机沉浸式控制台窗口；若该 VM 已有窗口则前置，不新开。</summary>
-        public static void OpenConsoleWindow(HostConsoleSession session)
+        public static void OpenConsoleWindow(HostConsoleSession session, ConsoleDisplayMode displayMode)
         {
             ArgumentNullException.ThrowIfNull(session);
             IHostConsoleRegistry registry = HostConsoleWindows.Registry;
             if (registry.TryActivate(session.WindowKey)) return;
 
-            var window = new ConsoleWindow(session);
+            var window = new ConsoleWindow(session, displayMode);
             registry.Register(session, window);
             window.Closed += (_, _) => registry.Unregister(session.WindowKey, window);
             try

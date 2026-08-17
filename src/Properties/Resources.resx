@@ -2217,6 +2217,21 @@ The existing NAT switch is: '{0}'</value>
   <data name="ConsoleViewModel_EnhancedSession" xml:space="preserve">
     <value>Enhanced Session</value>
   </data>
+  <data name="ConsoleDisplayMode_Title" xml:space="preserve">
+    <value>Choose console display mode</value>
+  </data>
+  <data name="ConsoleDisplayMode_Message" xml:space="preserve">
+    <value>Choose which monitors to use for the virtual machine console.</value>
+  </data>
+  <data name="ConsoleDisplayMode_AllMonitors" xml:space="preserve">
+    <value>Use all monitors</value>
+  </data>
+  <data name="ConsoleDisplayMode_SingleMonitor" xml:space="preserve">
+    <value>Use one monitor</value>
+  </data>
+  <data name="ConsoleDisplayMode_EnhancedRequired" xml:space="preserve">
+    <value>Using all monitors requires an enhanced session. This virtual machine does not currently provide one; choose a single monitor or try again later.</value>
+  </data>
   <data name="HostPageViewModel_DisablingHyperV" xml:space="preserve">
     <value>Disabling Hyper-V components...</value>
   </data>

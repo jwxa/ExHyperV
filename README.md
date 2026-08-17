@@ -572,6 +572,10 @@ The console window implements RDP connections based on MsRdpEx. It connects to `
 
 **Enhanced Session**: Connects via the RDP protocol. Requires Remote Desktop Services to be enabled inside the virtual machine (enabled by default on Windows). Supports bidirectional clipboard sharing, custom resolution, audio redirection, and other features, offering an experience closer to local usage.
 
+#### Multiple Monitors
+
+When a new console is opened, ExHyperV asks whether to use one monitor or all local monitors. **Use all monitors** requires Enhanced Session mode, negotiates the local monitor topology with the system RDP control, and expands the console across the local virtual desktop so each remote monitor maps to its corresponding physical monitor. The choice applies only to that console window and is not saved as a global preference. If the same VM already has an open console, ExHyperV activates the existing window without asking again.
+
 #### Resolution
 
 Only adjustable in Enhanced Session mode. In Basic Session mode, resolution is determined by the Hyper-V virtual graphics adapter and the internal operating system, and cannot be modified from the console side. To force a specific Basic Session resolution, run the following PowerShell command while the VM is powered off:
