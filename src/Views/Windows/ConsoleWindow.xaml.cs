@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using Microsoft.Win32;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Interop;
@@ -28,17 +29,36 @@ namespace ExHyperV.Views
         // 全屏热键 Ctrl+Alt+Enter，交给 mstscax 自带的 HotKeyFullScreen(此 vk 传给 FullScreenHotKeyVirtualKey)。
         // 仅 ZoomLevel=100 时有效——非 100% 缩放下 mstscax 的 UI_GoFullScreen 有 zoom!=100 即 return 的 guard，热键进不去全屏(by design，接受)。
         private const int FullScreenHotKeyVk = 0x0D;
+        private const int VkControl = 0x11;
+        private const int VkMenu = 0x12;
         // 连接超时：localhost VMBus 正常连接 <1s，2s 余量足够；连不上(如不支持增强)即在此时限内放弃 → 快速回退基本会话。
         private const int ConnectTimeoutSeconds = 2;
         // 增强会话：画面四周留出的可抓取缩放边（DIP）。mstscax 画面是 airspace、会盖住窗口边缘的缩放热区，
         // 留这点边让边缘是 WPF(RdpArea)、能抓住拖动缩放。值越小越窄，但太小会抓不到缩放热区。
         private const double EnhancedResizeBorder = 3;
+        // 解锁后的显示器拓扑会分阶段恢复。累计约 6.75 秒的有限采样覆盖常见的显示器唤醒过程，
+        // 每次恢复仍受窗口、连接和用户意图代次约束，不形成常驻轮询。
+        private static readonly int[] MultiMonitorRecoveryDelaysMs = { 0, 250, 500, 1000, 2000, 3000 };
+        // mstscax 的 LeaveFullScreen 可能先于 SystemEvents.SessionLock 到达；保留退出意图一小段时间，
+        // 让两个事件源有机会完成排序。实际窗口会立即退出全屏，不延迟用户看到的状态变化。
+        private const int MultiMonitorLeaveIntentDelayMs = 750;
+        // 显示器唤醒/热插拔事件可能分批到达；在最后一个事件后保留此过渡窗口，避免把系统退出误判为用户退出。
+        private const int MultiMonitorSystemTransitionGraceMs = 1500;
+        // 程序主动铺设/还原跨 DPI 窗口时，Windows 也会发送 WM_DPICHANGED。短暂抑制这类回声，
+        // 避免恢复失败后的窗口还原从 WndProc 旁路启动一组新重试。
+        private const int MultiMonitorInternalDpiSuppressionMs = 500;
+        private const int MultiMonitorFullScreenConfirmationTimeoutMs = 500;
+        private const int ManualDisplayRefitConfirmationTimeoutMs = 1500;
+        private const int MultiMonitorContentAlignmentPasses = 2;
 
         private readonly ConsoleViewModel _vm;
         private readonly HostConsoleSession _session;
         private readonly HostId _hostId;
         private readonly IHostSessionRegistry _sessionRegistry;
         private readonly bool _useAllMonitors;
+        private readonly MultiMonitorRecoveryState _multiMonitorRecoveryState;
+        private readonly ExpectedSystemLeaveState _expectedSystemLeave = new();
+        private readonly ExpectedSystemLeaveState _expectedRecoveryFailureLeave = new();
         private bool _isFullScreen;               // 供 WM_GETMINMAXINFO 判断最大化铺满显示器还是工作区
         private bool _syncingFs;                  // 防止 mstscax→VM→mstscax 全屏状态回灌
         private bool _weInitiatedDisconnect;      // 标记我方主动断开(模式切换/VM 停止)，以免被当作"非预期断开"
@@ -57,12 +77,26 @@ namespace ExHyperV.Views
         private System.Windows.Media.Brush? _origBackground;      // 全屏前的窗口底色，退出恢复
         private WINDOWPLACEMENT _multiMonitorRestorePlacement;     // 包含正常/最大化/最小化及正常态恢复边界
         private bool _multiMonitorRestoreValid;
-        private WindowStyle _multiMonitorRestoreStyle;
-        private ResizeMode _multiMonitorRestoreResizeMode;
-        private WindowBackdropType _multiMonitorRestoreBackdrop;
-        private System.Windows.Media.Brush? _multiMonitorRestoreBackground;
+        private object _multiMonitorRestoreStyleLocalValue = DependencyProperty.UnsetValue;
+        private object _multiMonitorRestoreResizeModeLocalValue = DependencyProperty.UnsetValue;
+        private object _multiMonitorRestoreBackdropLocalValue = DependencyProperty.UnsetValue;
+        private object _multiMonitorRestoreCornerLocalValue = DependencyProperty.UnsetValue;
+        private object _multiMonitorRestoreTopmostLocalValue = DependencyProperty.UnsetValue;
         private bool _multiMonitorRestoreTopmost;
         private bool _multiMonitorPlacementPending;
+        private int _multiMonitorRecoveryGeneration;
+        private int _sessionLockPending;
+        private int _systemTransitionGeneration;
+        private int _potentialUserLeaveGeneration;
+        private int _recoveryFailureLeaveGeneration;
+        private int _fullScreenConfirmationGeneration;
+        private int _multiMonitorInternalPlacementDepth;
+        private long _multiMonitorDpiSuppressedUntilTick;
+        private bool _multiMonitorUserMinimized;
+        private MultiMonitorTopology? _pendingMultiMonitorConnectionTopology;
+        private int _pendingMultiMonitorConnectionGeneration;
+        private MultiMonitorTopology? _negotiatedMultiMonitorTopology;
+        private bool _systemEventsSubscribed;
         private bool _closing;                                    // 用户经连接栏关闭：抑制断开后的自动重连（避免"复活"）
         private bool _topHookAdded;                                // 顶边缩放钩子是否已在 ContentRendered 注册（只挂一次）
 
@@ -71,10 +105,14 @@ namespace ExHyperV.Views
         {
         }
 
-        public ConsoleWindow(HostConsoleSession session, ConsoleDisplayMode displayMode)
+        public ConsoleWindow(
+            HostConsoleSession session,
+            ConsoleDisplayMode displayMode,
+            bool forceBasicSession = false)
         {
             _session = session ?? throw new ArgumentNullException(nameof(session));
             _useAllMonitors = displayMode == ConsoleDisplayMode.AllMonitors;
+            _multiMonitorRecoveryState = new MultiMonitorRecoveryState(_useAllMonitors);
             _hostId = session.Stamp.ProfileId is Guid profileId
                 ? HostId.FromProfileId(profileId)
                 : HostId.Local;
@@ -82,7 +120,11 @@ namespace ExHyperV.Views
             if (!_sessionRegistry.CanUseConsole(session.Stamp))
                 throw new InvalidOperationException("所属宿主会话已改变，未打开旧会话控制台。");
 
-            _vm = new ConsoleViewModel(session, _sessionRegistry, _useAllMonitors);
+            _vm = new ConsoleViewModel(
+                session,
+                _sessionRegistry,
+                _useAllMonitors,
+                forceBasicSession);
             this.DataContext = _vm;
             InitializeComponent();
             if (App.PerformanceMode)
@@ -107,6 +149,7 @@ namespace ExHyperV.Views
 
             _vm.SendCadRequested += OnSendCadRequested;
             _vm.FullScreenToggleRequested += OnFullScreenToggleRequested;
+            _vm.RefitDisplaysRequested += OnRefitDisplaysRequested;
             _vm.PropertyChanged += OnViewModelPropertyChanged;
             _vm.Polled += OnVmPolled;   // 每次状态轮询：让连接与 VM 运行状态一致（含断线/VM 重启后重连）
             _vm.ResolutionChangeRequested += (w, h) =>
@@ -120,23 +163,50 @@ namespace ExHyperV.Views
             };
 
             // RDP 宿主事件（原生事件，取代旧实现的 20ms 轮询）
-            RdpHost.Connected += () => Dispatcher.BeginInvoke(new Action(() =>
+            RdpHost.Connected += () =>
             {
-                _enhancedConnecting = false;   // 已连上（增强成功，或本就是基本）
-                // 基本会话连上即应用当前缩放档（不能依赖 RemoteSizeChange——同分辨率重连时它不触发）。
-                // 增强会话连上后【绝不】碰 ZoomLevel：mid-session 设 ZoomLevel 会和动态分辨率(UpdateSessionDisplaySettings)
-                // 打架，致画面不随分辨率刷新、还被缩成灰信箱。进增强前的归零已在 IsEnhancedMode 分支(断开重连之前)做好。
-                if (!_vm.IsEnhancedMode) ApplyBasicZoom();
-                if (_pendingEnhancedInset && _vm.IsEnhancedMode && !_vm.IsFullScreen)
+                int connectionGeneration = Volatile.Read(ref _rdpConnectionGeneration);
+                Dispatcher.BeginInvoke(new Action(() =>
                 {
-                    LayoutRdpHost();              // 增强复用基本分辨率时不触发 RemoteSizeChange，这里主动按当前分辨率把画面居中
-                    EnsureEnhancedResizeBorder(); // 放大窗口露出可抓取缩放边
-                    // 布局完成前禁止按中间窗口尺寸协商分辨率。
-                    Dispatcher.BeginInvoke(new Action(() => _pendingEnhancedInset = false),
-                        System.Windows.Threading.DispatcherPriority.Background);
-                }
-                else _pendingEnhancedInset = false;
-            }));
+                    if (_closing
+                        || connectionGeneration != Volatile.Read(ref _rdpConnectionGeneration)
+                        || RdpHost.ConnectionState != 1)
+                        return;
+                    if (_useAllMonitors
+                        && _pendingMultiMonitorConnectionGeneration == connectionGeneration
+                        && _pendingMultiMonitorConnectionTopology is MultiMonitorTopology negotiated)
+                    {
+                        _negotiatedMultiMonitorTopology = negotiated;
+                        _pendingMultiMonitorConnectionTopology = null;
+                        RecordObservedMultiMonitorTopology(negotiated);
+                    }
+                    _enhancedConnecting = false;   // 已连上（增强成功，或本就是基本）
+                    if (_useAllMonitors)
+                        QueueMultiMonitorFullScreenConfirmation(
+                            "多显示器连接完成",
+                            connectionGeneration);
+                    if (_useAllMonitors && _vm.IsRefittingDisplays)
+                    {
+                        int recoveryGeneration = Volatile.Read(ref _multiMonitorRecoveryGeneration);
+                        _ = VerifyManualDisplayRefitFullScreenAsync(
+                            connectionGeneration,
+                            recoveryGeneration);
+                    }
+                    // 基本会话连上即应用当前缩放档（不能依赖 RemoteSizeChange——同分辨率重连时它不触发）。
+                    // 增强会话连上后【绝不】碰 ZoomLevel：mid-session 设 ZoomLevel 会和动态分辨率(UpdateSessionDisplaySettings)
+                    // 打架，致画面不随分辨率刷新、还被缩成灰信箱。进增强前的归零已在 IsEnhancedMode 分支(断开重连之前)做好。
+                    if (!_vm.IsEnhancedMode) ApplyBasicZoom();
+                    if (_pendingEnhancedInset && _vm.IsEnhancedMode && !_vm.IsFullScreen)
+                    {
+                        LayoutRdpHost();              // 增强复用基本分辨率时不触发 RemoteSizeChange，这里主动按当前分辨率把画面居中
+                        EnsureEnhancedResizeBorder(); // 放大窗口露出可抓取缩放边
+                        // 布局完成前禁止按中间窗口尺寸协商分辨率。
+                        Dispatcher.BeginInvoke(new Action(() => _pendingEnhancedInset = false),
+                            System.Windows.Threading.DispatcherPriority.Background);
+                    }
+                    else _pendingEnhancedInset = false;
+                }));
+            };
             RdpHost.LoginCompleted += () => Dispatcher.BeginInvoke(new Action(() =>
             {
                 if (!_vm.IsEnhancedMode || _useAllMonitors) return;
@@ -149,6 +219,9 @@ namespace ExHyperV.Views
             RdpHost.Disconnected += reason =>
             {
                 Interlocked.Increment(ref _rdpConnectionGeneration);
+                CancelMultiMonitorRecovery();
+                _multiMonitorRecoveryState.InvalidatePendingLeave();
+                _expectedRecoveryFailureLeave.Clear();
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
                     if (_useAllMonitors && (_vm.IsFullScreen || _isFullScreen))
@@ -160,6 +233,7 @@ namespace ExHyperV.Views
                         if (_reconnectPending) { _reconnectPending = false; SyncConnection(forceReconnect: false); }   // 断完 → 重连
                         return;
                     }
+                    FinishManualDisplayRefit();
                     if (_enhancedConnecting)   // 增强会话没连上就断 → 回退基本会话（并把顶部开关切回）
                     {
                         _enhancedConnecting = false;
@@ -186,6 +260,7 @@ namespace ExHyperV.Views
             };
             RdpHost.FatalError += code => Dispatcher.BeginInvoke(new Action(() =>
             {
+                FinishManualDisplayRefit();
                 System.Diagnostics.Debug.WriteLine($"[Rdp] 致命错误 code={code}");   // 黑布由 RdpClientHost 在断开时自动盖住，等轮询重连
                 if (!_closing && !_weInitiatedDisconnect && !_enhancedConnecting)
                     _ = _vm.ReportUnexpectedConnectionLossAsync($"远程控制台发生致命错误，RDP code={code}。");
@@ -210,6 +285,13 @@ namespace ExHyperV.Views
             }));
             RdpHost.FullScreenRequested += fs =>
             {
+                // COM 事件可能先于 Dispatcher 回调返回；必须在事件边界采样按键状态，
+                // 否则 Ctrl+Alt+Enter 已松开后无法与系统触发的 Leave 区分。
+                bool userFullScreenHotKeyPressed = !fs && IsFullScreenHotKeyPressed();
+                // 一次性令牌也在事件边界消费，防止排队期间的新显示事件清除令牌并改写本次 Leave 的归属。
+                bool expectedSystemLeave = _useAllMonitors && !fs && _expectedSystemLeave.TryConsume();
+                bool expectedRecoveryFailureLeave =
+                    _useAllMonitors && !fs && _expectedRecoveryFailureLeave.TryConsume();
                 int generation = Volatile.Read(ref _rdpConnectionGeneration);
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
@@ -219,14 +301,107 @@ namespace ExHyperV.Views
                         return;
                     if (_useAllMonitors)
                     {
-                        SetMultiMonitorFullScreenState(fs);
+                        if (fs)
+                        {
+                            Interlocked.Exchange(ref _potentialUserLeaveGeneration, 0);
+                            _expectedRecoveryFailureLeave.Clear();
+                            _multiMonitorRecoveryState.RequestFullScreen();
+                            if (_multiMonitorUserMinimized) return;
+                            MultiMonitorTopology topology = CaptureMultiMonitorTopology();
+                            MultiMonitorTopology? connectionTopology =
+                                GetMultiMonitorTopologyForConnection(generation);
+                            if (connectionTopology is MultiMonitorTopology negotiated
+                                && negotiated != topology)
+                            {
+                                ScheduleMultiMonitorRecovery(
+                                    "进入全屏时检测到显示器拓扑变化",
+                                    Math.Max(
+                                        _multiMonitorRecoveryState.StableMonitorCount,
+                                        topology.MonitorCount));
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            CancelMultiMonitorRecovery();
+                            bool sessionTransitionPending =
+                                _multiMonitorRecoveryState.SessionLocked
+                                || Volatile.Read(ref _sessionLockPending) != 0;
+                            MultiMonitorLeaveDisposition disposition = MultiMonitorLeavePolicy.Resolve(
+                                userFullScreenHotKeyPressed,
+                                sessionTransitionPending,
+                                expectedSystemLeave,
+                                expectedRecoveryFailureLeave);
+
+                            if (disposition == MultiMonitorLeaveDisposition.UserRequestedWindowed)
+                            {
+                                FinishManualDisplayRefit();
+                                Interlocked.Exchange(ref _potentialUserLeaveGeneration, 0);
+                                _expectedSystemLeave.Clear();
+                                _expectedRecoveryFailureLeave.Clear();
+                                _multiMonitorRecoveryState.RequestWindowed();
+                                SetMultiMonitorFullScreenState(false);
+                                AppLog.Information("RDP 控制台", "用户通过 Ctrl+Alt+Enter 退出多显示器全屏。",
+                                    ConsoleLogContext(new Dictionary<string, object?>
+                                    {
+                                        ["ConnectionGeneration"] = generation,
+                                    }));
+                                return;
+                            }
+
+                            if (disposition == MultiMonitorLeaveDisposition.ConfirmPotentialUserLeave)
+                            {
+                                int leaveGeneration =
+                                    _multiMonitorRecoveryState.BeginPotentialUserLeave();
+                                // 先停止当前恢复任务，避免用户按热键退出后在确认窗口期间又被拉回全屏。
+                                if (leaveGeneration != 0)
+                                {
+                                    Volatile.Write(ref _potentialUserLeaveGeneration, leaveGeneration);
+                                    _ = ConfirmPotentialMultiMonitorLeaveAsync(leaveGeneration);
+                                }
+                            }
+                            else
+                                Interlocked.Exchange(ref _potentialUserLeaveGeneration, 0);
+
+                            SetMultiMonitorFullScreenState(false);
+                            if (disposition == MultiMonitorLeaveDisposition.PreserveIntentAndRecover
+                                && _multiMonitorRecoveryState.FullScreenDesired
+                                && !sessionTransitionPending)
+                                ScheduleMultiMonitorRecovery(
+                                    "mstscax 在系统显示过渡期间退出全屏");
+                            return;
+                        }
+                        bool fullScreenApplied = SetMultiMonitorFullScreenState(fs);
+                        if (fs && !fullScreenApplied)
+                            RollbackNativeFullScreenAfterContainerFailure(
+                                "收到原生全屏事件后容器铺设失败",
+                                generation);
                         return;
                     }
                     _syncingFs = true; _vm.IsFullScreen = fs; _syncingFs = false;   // 源自 mstscax 热键，只反映到 VM，不回灌（画面分辨率由 RdpArea.SizeChanged 协商）
                 }));
             };
-            RdpHost.MinimizeRequested += () => Dispatcher.BeginInvoke(new Action(() => this.WindowState = WindowState.Minimized));
-            RdpHost.CloseRequested += () => Dispatcher.BeginInvoke(new Action(() => { if (_closing) return; _closing = true; this.Close(); }));
+            RdpHost.FullScreenStartFailed += () =>
+            {
+                int generation = Volatile.Read(ref _rdpConnectionGeneration);
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (!_useAllMonitors
+                        || _closing
+                        || generation != Volatile.Read(ref _rdpConnectionGeneration)
+                        || RdpHost.ConnectionState != 1
+                        || _multiMonitorUserMinimized)
+                        return;
+
+                    ScheduleMultiMonitorRecovery(
+                        "mstscax 拒绝进入多显示器全屏",
+                        System.Windows.Forms.Screen.AllScreens.Length);
+                }));
+            };
+            RdpHost.MinimizeRequested += () =>
+                Dispatcher.BeginInvoke(new Action(OnConsoleMinimizeRequested));
+            RdpHost.CloseRequested += () =>
+                Dispatcher.BeginInvoke(new Action(OnConsoleCloseRequested));
 
             // 可用区域(RdpArea)变化 = 最大化/还原/全屏/退出全屏：重排画面对齐 + 增强会话按新区域重新协商分辨率填充。
             // 拖动改大小期间(_userResizing)不在此协商（避免每像素刷新 mstscax），拖完由 WM_EXITSIZEMOVE 协商一次。
@@ -243,6 +418,718 @@ namespace ExHyperV.Views
         {
             base.OnSourceInitialized(e);
             HwndSource.FromHwnd(new WindowInteropHelper(this).Handle)?.AddHook(WndProc);
+            SubscribeMultiMonitorSystemEvents();
+        }
+
+        private void SubscribeMultiMonitorSystemEvents()
+        {
+            if (!_useAllMonitors || _systemEventsSubscribed) return;
+
+            try
+            {
+                SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+                SystemEvents.SessionSwitch += OnSystemSessionSwitch;
+                _systemEventsSubscribed = true;
+            }
+            catch (Exception ex)
+            {
+                SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+                SystemEvents.SessionSwitch -= OnSystemSessionSwitch;
+                AppLog.Warning("RDP 控制台", "无法订阅多显示器恢复所需的 Windows 系统事件。",
+                    ConsoleLogContext(new Dictionary<string, object?>
+                    {
+                        ["UseAllMonitors"] = _useAllMonitors,
+                    }), ex);
+            }
+        }
+
+        private void UnsubscribeMultiMonitorSystemEvents()
+        {
+            if (!_systemEventsSubscribed) return;
+            _systemEventsSubscribed = false;
+            SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+            SystemEvents.SessionSwitch -= OnSystemSessionSwitch;
+        }
+
+        private void OnDisplaySettingsChanged(object? sender, EventArgs e) =>
+            QueueMultiMonitorSystemTransition("Windows 显示设置变化");
+
+        private void QueueMultiMonitorSystemTransition(string trigger)
+        {
+            if (!_useAllMonitors || _closing || Dispatcher.HasShutdownStarted) return;
+            int transitionGeneration = Interlocked.Increment(ref _systemTransitionGeneration);
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(() => HandleMultiMonitorSystemTransition(
+                    trigger,
+                    transitionGeneration)));
+                return;
+            }
+
+            HandleMultiMonitorSystemTransition(trigger, transitionGeneration);
+        }
+
+        private void HandleMultiMonitorSystemTransition(string trigger, int transitionGeneration)
+        {
+            if (!_useAllMonitors
+                || _closing
+                || transitionGeneration != Volatile.Read(ref _systemTransitionGeneration))
+                return;
+            PrepareForExpectedSystemLeave(transitionGeneration);
+            _ = ExpireMultiMonitorSystemTransitionAsync(transitionGeneration);
+            if (_vm.IsRefittingDisplays) return;
+            ScheduleMultiMonitorRecovery(trigger);
+        }
+
+        private async Task ExpireMultiMonitorSystemTransitionAsync(int transitionGeneration)
+        {
+            try
+            {
+                await Task.Delay(MultiMonitorSystemTransitionGraceMs);
+                if (Dispatcher.HasShutdownStarted) return;
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    _expectedSystemLeave.Expire(transitionGeneration);
+                });
+            }
+            catch (Exception ex)
+            {
+                if (!_closing)
+                    AppLog.Warning("RDP 控制台", "结束多显示器系统过渡窗口时发生异常。",
+                        ConsoleLogContext(new Dictionary<string, object?>
+                        {
+                            ["TransitionGeneration"] = transitionGeneration,
+                        }), ex);
+            }
+        }
+
+        private void OnSystemSessionSwitch(object sender, SessionSwitchEventArgs e)
+        {
+            if (!_useAllMonitors || _closing || Dispatcher.HasShutdownStarted) return;
+            int transitionGeneration = 0;
+            if (e.Reason == SessionSwitchReason.SessionLock)
+            {
+                Volatile.Write(ref _sessionLockPending, 1);
+                transitionGeneration = Interlocked.Increment(ref _systemTransitionGeneration);
+            }
+            else if (e.Reason == SessionSwitchReason.SessionUnlock)
+            {
+                Volatile.Write(ref _sessionLockPending, 0);
+                transitionGeneration = Interlocked.Increment(ref _systemTransitionGeneration);
+            }
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(() => HandleSystemSessionSwitch(
+                    e.Reason,
+                    transitionGeneration)));
+                return;
+            }
+
+            HandleSystemSessionSwitch(e.Reason, transitionGeneration);
+        }
+
+        private void HandleSystemSessionSwitch(
+            SessionSwitchReason reason,
+            int transitionGeneration)
+        {
+            if (!_useAllMonitors || _closing) return;
+
+            if (reason == SessionSwitchReason.SessionLock)
+            {
+                FinishManualDisplayRefit();
+                int monitorCount = System.Windows.Forms.Screen.AllScreens.Length;
+                Interlocked.Exchange(ref _potentialUserLeaveGeneration, 0);
+                _expectedSystemLeave.Clear();
+                _expectedRecoveryFailureLeave.Clear();
+                _multiMonitorRecoveryState.Lock(monitorCount);
+                CancelMultiMonitorRecovery();
+                AppLog.Information("RDP 控制台", "Windows 会话已锁定，已记录多显示器全屏恢复状态。",
+                    ConsoleLogContext(new Dictionary<string, object?>
+                    {
+                        ["RestoreAfterUnlock"] = _multiMonitorRecoveryState.FullScreenDesired,
+                        ["MonitorCountBeforeLock"] = Math.Max(
+                            _multiMonitorRecoveryState.StableMonitorCount,
+                            monitorCount),
+                    }));
+                return;
+            }
+
+            if (reason != SessionSwitchReason.SessionUnlock) return;
+
+            Volatile.Write(ref _sessionLockPending, 0);
+            MultiMonitorUnlockRecovery recovery = _multiMonitorRecoveryState.Unlock();
+            if (transitionGeneration == 0)
+            {
+                transitionGeneration = Interlocked.Increment(ref _systemTransitionGeneration);
+            }
+            PrepareForExpectedSystemLeave(transitionGeneration);
+            _ = ExpireMultiMonitorSystemTransitionAsync(transitionGeneration);
+            bool fullScreenNeedsRecovery =
+                _multiMonitorRecoveryState.FullScreenDesired && !_isFullScreen;
+            if (recovery.ShouldRecover || fullScreenNeedsRecovery)
+                ScheduleMultiMonitorRecovery(
+                    "Windows 会话解锁",
+                    expectedMonitorCount: Math.Max(
+                        recovery.ExpectedMonitorCount,
+                        Math.Max(
+                            _multiMonitorRecoveryState.StableMonitorCount,
+                            System.Windows.Forms.Screen.AllScreens.Length)));
+        }
+
+        private void ScheduleMultiMonitorRecovery(
+            string trigger,
+            int expectedMonitorCount = 0,
+            bool forceReconnect = false)
+        {
+            if (!_useAllMonitors || _closing || Dispatcher.HasShutdownStarted) return;
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(() => ScheduleMultiMonitorRecovery(
+                    trigger,
+                    expectedMonitorCount,
+                    forceReconnect)));
+                return;
+            }
+
+            if (_multiMonitorRecoveryState.SessionLocked)
+            {
+                _multiMonitorRecoveryState.RememberLockedTopology(
+                    System.Windows.Forms.Screen.AllScreens.Length);
+                return;
+            }
+
+            if (!_multiMonitorRecoveryState.FullScreenDesired || _multiMonitorUserMinimized) return;
+
+            CancelMultiMonitorRecovery();
+            int recoveryGeneration = Volatile.Read(ref _multiMonitorRecoveryGeneration);
+            int connectionGeneration = Volatile.Read(ref _rdpConnectionGeneration);
+            int requiredMonitorCount = _multiMonitorRecoveryState.ResolveExpectedMonitorCount(
+                expectedMonitorCount,
+                System.Windows.Forms.Screen.AllScreens.Length);
+            AppLog.Information("RDP 控制台", "已计划恢复多显示器全屏布局。",
+                ConsoleLogContext(new Dictionary<string, object?>
+                {
+                    ["Trigger"] = trigger,
+                    ["ExpectedMonitorCount"] = requiredMonitorCount,
+                    ["RecoveryGeneration"] = recoveryGeneration,
+                    ["ForceReconnect"] = forceReconnect,
+                }));
+            _ = RecoverMultiMonitorLayoutIfCurrent(
+                recoveryGeneration,
+                connectionGeneration,
+                requiredMonitorCount,
+                trigger,
+                forceReconnect);
+        }
+
+        private async Task RecoverMultiMonitorLayoutIfCurrent(
+            int recoveryGeneration,
+            int connectionGeneration,
+            int expectedMonitorCount,
+            string trigger,
+            bool forceReconnect)
+        {
+            MultiMonitorTopology? previousTopology = null;
+            int stableSamples = 0;
+            bool reconnectHandedOff = false;
+
+            try
+            {
+                for (int attempt = 0; attempt < MultiMonitorRecoveryDelaysMs.Length; attempt++)
+                {
+                    int delay = MultiMonitorRecoveryDelaysMs[attempt];
+                    if (delay > 0) await Task.Delay(delay);
+                    if (!IsMultiMonitorRecoveryCurrent(recoveryGeneration, connectionGeneration)) return;
+
+                    MultiMonitorTopology topology = CaptureMultiMonitorTopology();
+                    stableSamples = previousTopology is MultiMonitorTopology previous && previous == topology
+                        ? stableSamples + 1
+                        : 1;
+                    previousTopology = topology;
+
+                    bool topologyStable = stableSamples >= 2;
+                    bool expectedMonitorCountAvailable =
+                        topology.MonitorCount >= expectedMonitorCount;
+                    bool lastAttempt = attempt == MultiMonitorRecoveryDelaysMs.Length - 1;
+                    if (!topologyStable || (!expectedMonitorCountAvailable && !lastAttempt))
+                    {
+                        AppLog.Information("RDP 控制台", "正在等待多显示器拓扑稳定。",
+                            ConsoleLogContext(new Dictionary<string, object?>
+                            {
+                                ["Trigger"] = trigger,
+                                ["Attempt"] = attempt + 1,
+                                ["MonitorCount"] = topology.MonitorCount,
+                                ["ExpectedMonitorCount"] = expectedMonitorCount,
+                                ["VirtualBounds"] = topology.Bounds,
+                                ["StableSamples"] = stableSamples,
+                            }));
+                        continue;
+                    }
+
+                    MultiMonitorTopology? connectionTopology =
+                        GetMultiMonitorTopologyForConnection(connectionGeneration);
+                    bool topologyChanged = connectionTopology is not MultiMonitorTopology negotiated
+                        || negotiated != topology;
+                    if (forceReconnect || topologyChanged)
+                    {
+                        // 同一 RDP 连接的 UseMultimon 拓扑不能在连接中途重新协商。增加/移除屏幕或
+                        // 改变虚拟桌面边界时，等待至少三次稳定采样（缺屏则等到最后一次）再受控重连。
+                        if (stableSamples < 3 && !lastAttempt) continue;
+                        ReconnectForMultiMonitorTopologyChange(
+                            topology,
+                            trigger,
+                            expectedMonitorCount);
+                        reconnectHandedOff = true;
+                        return;
+                    }
+
+                    if (RdpHost.ConnectionState != 1) continue;
+
+                    bool rdpFullScreenApplied = RdpHost.SetFullScreen(true);
+                    if (!rdpFullScreenApplied
+                        || !IsMultiMonitorRecoveryCurrent(recoveryGeneration, connectionGeneration))
+                        continue;
+                    if (!_isFullScreen)
+                        SetMultiMonitorFullScreenState(
+                            true,
+                            scheduleRecoveryOnFailure: false,
+                            queuePlacementVerification: false);
+                    if (!_isFullScreen
+                        || !IsMultiMonitorRecoveryCurrent(recoveryGeneration, connectionGeneration))
+                        continue;
+
+                    if (ReapplyMultiMonitorWindowBounds(topology, trigger, attempt + 1))
+                    {
+                        FinishManualDisplayRefit();
+                        AppLog.Information("RDP 控制台", "多显示器全屏布局已主动恢复。",
+                            ConsoleLogContext(new Dictionary<string, object?>
+                            {
+                                ["Trigger"] = trigger,
+                                ["Attempt"] = attempt + 1,
+                                ["MonitorCount"] = topology.MonitorCount,
+                                ["VirtualBounds"] = topology.Bounds,
+                            }));
+                        RdpHost.ReportMultiMonitorState("锁屏或显示变化后已恢复多显示器全屏");
+                        return;
+                    }
+                }
+
+                if (IsMultiMonitorRecoveryCurrent(recoveryGeneration, connectionGeneration))
+                {
+                    AppLog.Warning("RDP 控制台", "在有限重试次数内未能恢复多显示器全屏布局。",
+                        ConsoleLogContext(new Dictionary<string, object?>
+                        {
+                            ["Trigger"] = trigger,
+                            ["ExpectedMonitorCount"] = expectedMonitorCount,
+                            ["Attempts"] = MultiMonitorRecoveryDelaysMs.Length,
+                        }));
+                    SynchronizeAfterMultiMonitorRecoveryFailure(
+                        recoveryGeneration,
+                        connectionGeneration,
+                        trigger);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (IsMultiMonitorRecoveryCurrent(recoveryGeneration, connectionGeneration))
+                {
+                    AppLog.Warning("RDP 控制台", "恢复多显示器全屏布局时发生异常。",
+                        ConsoleLogContext(new Dictionary<string, object?>
+                        {
+                            ["Trigger"] = trigger,
+                        }), ex);
+                    SynchronizeAfterMultiMonitorRecoveryFailure(
+                        recoveryGeneration,
+                        connectionGeneration,
+                        trigger);
+                }
+            }
+            finally
+            {
+                if (forceReconnect && !reconnectHandedOff)
+                    FinishManualDisplayRefit();
+            }
+        }
+
+        private void SynchronizeAfterMultiMonitorRecoveryFailure(
+            int recoveryGeneration,
+            int connectionGeneration,
+            string trigger)
+        {
+            if (!IsMultiMonitorRecoveryCurrent(recoveryGeneration, connectionGeneration)) return;
+
+            FinishManualDisplayRefit();
+
+            int leaveGeneration = 0;
+            if (!_closing && RdpHost.ConnectionState == 1)
+                leaveGeneration = ArmExpectedRecoveryFailureLeave();
+
+            SetMultiMonitorFullScreenState(false);
+            if (_closing || RdpHost.ConnectionState != 1)
+            {
+                _expectedRecoveryFailureLeave.Expire(leaveGeneration);
+                return;
+            }
+
+            bool rdpWindowed = RdpHost.SetFullScreen(false);
+            AppLog.Warning("RDP 控制台", "多显示器恢复重试已耗尽，已等待下一次显示器变化再次恢复。",
+                ConsoleLogContext(new Dictionary<string, object?>
+                {
+                    ["Trigger"] = trigger,
+                    ["RecoveryGeneration"] = recoveryGeneration,
+                    ["ConnectionGeneration"] = connectionGeneration,
+                    ["RdpWindowed"] = rdpWindowed,
+                }));
+        }
+
+        private async Task ExpireExpectedRecoveryFailureLeaveAsync(int leaveGeneration)
+        {
+            try
+            {
+                await Task.Delay(MultiMonitorSystemTransitionGraceMs);
+                if (Dispatcher.HasShutdownStarted) return;
+                await Dispatcher.InvokeAsync(() =>
+                    _expectedRecoveryFailureLeave.Expire(leaveGeneration));
+            }
+            catch (Exception ex)
+            {
+                if (!_closing)
+                    AppLog.Warning("RDP 控制台", "结束多显示器恢复失败退出令牌时发生异常。",
+                        ConsoleLogContext(new Dictionary<string, object?>
+                        {
+                            ["LeaveGeneration"] = leaveGeneration,
+                        }), ex);
+            }
+        }
+
+        private bool IsMultiMonitorRecoveryCurrent(int recoveryGeneration, int connectionGeneration) =>
+            !_closing
+            && _useAllMonitors
+            && !_multiMonitorUserMinimized
+            && !_multiMonitorRecoveryState.SessionLocked
+            && _multiMonitorRecoveryState.FullScreenDesired
+            && recoveryGeneration == Volatile.Read(ref _multiMonitorRecoveryGeneration)
+            && connectionGeneration == Volatile.Read(ref _rdpConnectionGeneration)
+            && _sessionRegistry.CanUseConsole(_session.Stamp);
+
+        private async Task ConfirmPotentialMultiMonitorLeaveAsync(int leaveGeneration)
+        {
+            try
+            {
+                await Task.Delay(MultiMonitorLeaveIntentDelayMs);
+                if (_closing || Dispatcher.HasShutdownStarted) return;
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    bool? windowsSessionLocked = WindowsSessionLockState.QueryCurrent();
+                    bool sessionTransitionPending =
+                        Volatile.Read(ref _sessionLockPending) != 0
+                        || windowsSessionLocked == true;
+                    bool userLeaveConfirmed = _multiMonitorRecoveryState.ConfirmPotentialUserLeave(
+                            leaveGeneration,
+                            sessionTransitionPending);
+                    Interlocked.CompareExchange(
+                        ref _potentialUserLeaveGeneration,
+                        0,
+                        leaveGeneration);
+                    if (!userLeaveConfirmed)
+                        return;
+
+                    FinishManualDisplayRefit();
+                    CancelMultiMonitorRecovery();
+                    AppLog.Information("RDP 控制台", "已确认用户退出多显示器全屏。",
+                        ConsoleLogContext(new Dictionary<string, object?>
+                        {
+                            ["LeaveGeneration"] = leaveGeneration,
+                        }));
+                });
+            }
+            catch (Exception ex)
+            {
+                if (!_closing)
+                    AppLog.Warning("RDP 控制台", "确认多显示器全屏退出意图时发生异常。",
+                        ConsoleLogContext(new Dictionary<string, object?>
+                        {
+                            ["LeaveGeneration"] = leaveGeneration,
+                        }), ex);
+            }
+        }
+
+        private void CancelMultiMonitorRecovery()
+        {
+            Interlocked.Increment(ref _multiMonitorRecoveryGeneration);
+            Interlocked.Increment(ref _fullScreenConfirmationGeneration);
+        }
+
+        private void PrepareForExpectedSystemLeave(int transitionGeneration)
+        {
+            if (transitionGeneration != Volatile.Read(ref _systemTransitionGeneration)) return;
+            _expectedRecoveryFailureLeave.Clear();
+            int pendingLeave = Interlocked.Exchange(ref _potentialUserLeaveGeneration, 0);
+            _multiMonitorRecoveryState.InvalidatePendingLeave();
+            if (transitionGeneration == 0 || pendingLeave != 0 || !_isFullScreen)
+            {
+                _expectedSystemLeave.Clear();
+                return;
+            }
+
+            _expectedSystemLeave.Arm(transitionGeneration);
+        }
+
+        private static MultiMonitorTopology CaptureMultiMonitorTopology()
+        {
+            System.Windows.Forms.Screen[] screens = System.Windows.Forms.Screen.AllScreens;
+            if (screens.Length == 0)
+            {
+                var virtualScreen = System.Windows.Forms.SystemInformation.VirtualScreen;
+                return new MultiMonitorTopology(
+                    0,
+                    virtualScreen.Left,
+                    virtualScreen.Top,
+                    virtualScreen.Width,
+                    virtualScreen.Height,
+                    string.Empty);
+            }
+
+            int left = screens.Min(screen => screen.Bounds.Left);
+            int top = screens.Min(screen => screen.Bounds.Top);
+            int right = screens.Max(screen => screen.Bounds.Right);
+            int bottom = screens.Max(screen => screen.Bounds.Bottom);
+            string monitorLayout = string.Join(";", screens
+                .OrderBy(screen => screen.Bounds.Left)
+                .ThenBy(screen => screen.Bounds.Top)
+                .ThenBy(screen => screen.Bounds.Right)
+                .ThenBy(screen => screen.Bounds.Bottom)
+                .Select(screen => $"{(screen.Primary ? 'P' : 'S')}:{FormatRect(
+                    screen.Bounds.Left,
+                    screen.Bounds.Top,
+                    screen.Bounds.Right,
+                    screen.Bounds.Bottom)}"));
+            return new MultiMonitorTopology(
+                screens.Length,
+                left,
+                top,
+                right - left,
+                bottom - top,
+                monitorLayout);
+        }
+
+        private void RecordObservedMultiMonitorTopology(MultiMonitorTopology topology)
+        {
+            _multiMonitorRecoveryState.RecordStableTopology(topology.MonitorCount);
+        }
+
+        private MultiMonitorTopology? GetMultiMonitorTopologyForConnection(int connectionGeneration) =>
+            _pendingMultiMonitorConnectionGeneration == connectionGeneration
+                && _pendingMultiMonitorConnectionTopology is MultiMonitorTopology pending
+                    ? pending
+                    : _negotiatedMultiMonitorTopology;
+
+        private MultiMonitorWindowPlacementScope BeginMultiMonitorWindowPlacement()
+        {
+            Interlocked.Increment(ref _multiMonitorInternalPlacementDepth);
+            return new MultiMonitorWindowPlacementScope(this);
+        }
+
+        private void EndMultiMonitorWindowPlacement()
+        {
+            int depth = Interlocked.Decrement(ref _multiMonitorInternalPlacementDepth);
+            if (depth > 0) return;
+            if (depth < 0) Interlocked.Exchange(ref _multiMonitorInternalPlacementDepth, 0);
+            Volatile.Write(
+                ref _multiMonitorDpiSuppressedUntilTick,
+                Environment.TickCount64 + MultiMonitorInternalDpiSuppressionMs);
+        }
+
+        private bool IsMultiMonitorDpiRecoverySuppressed() =>
+            Volatile.Read(ref _multiMonitorInternalPlacementDepth) > 0
+            || Environment.TickCount64 < Volatile.Read(ref _multiMonitorDpiSuppressedUntilTick);
+
+        private sealed class MultiMonitorWindowPlacementScope : IDisposable
+        {
+            private ConsoleWindow? _owner;
+
+            public MultiMonitorWindowPlacementScope(ConsoleWindow owner) => _owner = owner;
+
+            public void Dispose()
+            {
+                ConsoleWindow? owner = _owner;
+                _owner = null;
+                owner?.EndMultiMonitorWindowPlacement();
+            }
+        }
+
+        private void ApplyMultiMonitorFullScreenVisuals(IntPtr hwnd)
+        {
+            if (WindowState != WindowState.Normal) WindowState = WindowState.Normal;
+            WindowStyle = WindowStyle.None;
+            ResizeMode = ResizeMode.NoResize;
+            WindowBackdropType = WindowBackdropType.None;
+            WindowCornerPreference = WindowCornerPreference.DoNotRound;
+            Topmost = true;
+
+            ReapplyMultiMonitorDwmFrame(hwnd);
+
+            RdpHost.SetSmartSizing(false);
+            RdpHost.HorizontalAlignment = HorizontalAlignment.Stretch;
+            RdpHost.VerticalAlignment = VerticalAlignment.Stretch;
+            RdpHost.Width = double.NaN;
+            RdpHost.Height = double.NaN;
+        }
+
+        private void ReapplyMultiMonitorDwmFrame(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return;
+            WindowCornerPreference = WindowCornerPreference.DoNotRound;
+            uint noBorder = DWMWA_COLOR_NONE;
+            DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref noBorder, sizeof(uint));
+        }
+
+        private static void RestoreLocalValue(
+            DependencyObject target,
+            DependencyProperty property,
+            object localValue)
+        {
+            if (ReferenceEquals(localValue, DependencyProperty.UnsetValue))
+                target.ClearValue(property);
+            else
+                target.SetValue(property, localValue);
+        }
+
+        private bool TryAlignMultiMonitorContentBounds(
+            IntPtr hwnd,
+            MultiMonitorTopology topology,
+            string trigger,
+            int attempt,
+            out string actualWindowBounds,
+            out string actualContentBounds,
+            out int win32Error)
+        {
+            var target = new MultiMonitorPixelBounds(
+                topology.Left,
+                topology.Top,
+                topology.Right,
+                topology.Bottom);
+            actualWindowBounds = "unavailable";
+            actualContentBounds = "unavailable";
+            win32Error = 0;
+
+            for (int pass = 1; pass <= MultiMonitorContentAlignmentPasses + 1; pass++)
+            {
+                RdpHost.InvalidateMeasure();
+                RdpArea.UpdateLayout();
+                if (!GetWindowRect(hwnd, out RECT nativeWindow)) return false;
+
+                var windowBounds = new MultiMonitorPixelBounds(
+                    nativeWindow.Left,
+                    nativeWindow.Top,
+                    nativeWindow.Right,
+                    nativeWindow.Bottom);
+                actualWindowBounds = windowBounds.Bounds;
+                if (!RdpHost.TryGetContentScreenBounds(out MultiMonitorPixelBounds contentBounds))
+                    return false;
+
+                actualContentBounds = contentBounds.Bounds;
+                if (contentBounds == target) return true;
+                if (pass > MultiMonitorContentAlignmentPasses) return false;
+
+                MultiMonitorPixelBounds correctedWindow =
+                    MultiMonitorContentAlignment.CalculateWindowBounds(
+                        target,
+                        windowBounds,
+                        contentBounds);
+                AppLog.Information("RDP 控制台", "检测到多显示器内容区存在像素偏移，正在校正。",
+                    ConsoleLogContext(new Dictionary<string, object?>
+                    {
+                        ["Trigger"] = trigger,
+                        ["Attempt"] = attempt,
+                        ["AlignmentPass"] = pass,
+                        ["ExpectedContentBounds"] = target.Bounds,
+                        ["ActualContentBounds"] = contentBounds.Bounds,
+                        ["CurrentWindowBounds"] = windowBounds.Bounds,
+                        ["CorrectedWindowBounds"] = correctedWindow.Bounds,
+                    }));
+                if (!SetWindowPos(
+                        hwnd,
+                        HWND_TOPMOST,
+                        correctedWindow.Left,
+                        correctedWindow.Top,
+                        correctedWindow.Width,
+                        correctedWindow.Height,
+                        SWP_FRAMECHANGED | SWP_SHOWWINDOW))
+                {
+                    win32Error = Marshal.GetLastWin32Error();
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        private void ReconnectForMultiMonitorTopologyChange(
+            MultiMonitorTopology topology,
+            string trigger,
+            int expectedMonitorCount)
+        {
+            RecordObservedMultiMonitorTopology(topology);
+            Interlocked.Exchange(ref _potentialUserLeaveGeneration, 0);
+            int transitionGeneration = Interlocked.Increment(ref _systemTransitionGeneration);
+            PrepareForExpectedSystemLeave(transitionGeneration);
+            _ = ExpireMultiMonitorSystemTransitionAsync(transitionGeneration);
+            _expectedRecoveryFailureLeave.Clear();
+            CancelMultiMonitorRecovery();
+
+            AppLog.Information("RDP 控制台", "显示器拓扑已稳定，正在重新连接以协商多显示器布局。",
+                ConsoleLogContext(new Dictionary<string, object?>
+                {
+                    ["Trigger"] = trigger,
+                    ["ExpectedMonitorCount"] = expectedMonitorCount,
+                    ["MonitorCount"] = topology.MonitorCount,
+                    ["VirtualBounds"] = topology.Bounds,
+                    ["MonitorLayout"] = topology.MonitorLayout,
+                }));
+            SyncConnection(forceReconnect: true);
+        }
+
+        private bool ReapplyMultiMonitorWindowBounds(
+            MultiMonitorTopology topology,
+            string trigger,
+            int attempt)
+        {
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            if (_multiMonitorUserMinimized
+                || hwnd == IntPtr.Zero
+                || topology.Width <= 0
+                || topology.Height <= 0)
+                return false;
+
+            using MultiMonitorWindowPlacementScope placementScope =
+                BeginMultiMonitorWindowPlacement();
+            ApplyMultiMonitorFullScreenVisuals(hwnd);
+            bool contentAligned = TryAlignMultiMonitorContentBounds(
+                hwnd,
+                topology,
+                trigger,
+                attempt,
+                out string actualWindowBounds,
+                out string actualContentBounds,
+                out int error);
+            if (contentAligned)
+            {
+                RecordObservedMultiMonitorTopology(topology);
+                return true;
+            }
+
+            AppLog.Warning("RDP 控制台", "多显示器主动恢复的内容边界校验失败。",
+                ConsoleLogContext(new Dictionary<string, object?>
+                {
+                    ["Trigger"] = trigger,
+                    ["Attempt"] = attempt,
+                    ["ExpectedContentBounds"] = topology.Bounds,
+                    ["ActualContentBounds"] = actualContentBounds,
+                    ["ActualWindowBounds"] = actualWindowBounds,
+                    ["Win32Error"] = error,
+                }));
+            return false;
         }
 
         // 顶边缩放钩子在 ContentRendered（晚于 TitleBar 的 Loaded）注册 → 处于 FIFO 末位、末位 handled 取胜，
@@ -253,6 +1140,50 @@ namespace ExHyperV.Views
             if (_topHookAdded) return;
             _topHookAdded = true;
             HwndSource.FromHwnd(new WindowInteropHelper(this).Handle)?.AddHook(TopResizeHook);
+        }
+
+        protected override void OnStateChanged(EventArgs e)
+        {
+            base.OnStateChanged(e);
+            if (!_useAllMonitors
+                || _closing
+                || WindowState != WindowState.Minimized
+                || _multiMonitorUserMinimized)
+                return;
+
+            FinishManualDisplayRefit();
+            _multiMonitorUserMinimized = true;
+            CancelMultiMonitorRecovery();
+        }
+
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+            if (_useAllMonitors && _isFullScreen && !_closing)
+            {
+                ReapplyMultiMonitorDwmFrame(new WindowInteropHelper(this).Handle);
+            }
+            ResumeMultiMonitorAfterMinimize("控制台窗口从最小化恢复");
+        }
+
+        protected override void OnDeactivated(EventArgs e)
+        {
+            base.OnDeactivated(e);
+            if (_useAllMonitors && _isFullScreen && !_closing)
+                ReapplyMultiMonitorDwmFrame(new WindowInteropHelper(this).Handle);
+        }
+
+        private void ResumeMultiMonitorAfterMinimize(string trigger)
+        {
+            if (!_useAllMonitors
+                || _closing
+                || !_multiMonitorUserMinimized
+                || WindowState == WindowState.Minimized)
+                return;
+
+            _multiMonitorUserMinimized = false;
+            if (_multiMonitorRecoveryState.FullScreenDesired)
+                QueueMultiMonitorSystemTransition(trigger);
         }
 
         // 增强 + 窗口化时，窗口顶部 TopResizeGrip 像素内 → HTTOP，使顶边可上下拉动改分辨率（底边被任务栏盖住时的退路）。
@@ -290,15 +1221,226 @@ namespace ExHyperV.Views
         {
             if (!_useAllMonitors || _closing || RdpHost.ConnectionState != 1) return;
 
+            bool fullScreen = !_vm.IsFullScreen;
+            if (fullScreen)
+                _multiMonitorRecoveryState.RequestFullScreen();
+            else
+            {
+                FinishManualDisplayRefit();
+                _multiMonitorRecoveryState.RequestWindowed();
+            }
+            Interlocked.Exchange(ref _potentialUserLeaveGeneration, 0);
+            _expectedRecoveryFailureLeave.Clear();
+            CancelMultiMonitorRecovery();
             // 只向 mstscax 请求切换；窗口状态等待 OnRequestGo/LeaveFullScreen 确认，
             // COM 拒绝请求时不会折叠标题栏形成“伪全屏”。
-            RdpHost.SetFullScreen(!_vm.IsFullScreen);
+            bool requestAccepted = RdpHost.SetFullScreen(fullScreen);
+            if (fullScreen)
+            {
+                if (requestAccepted)
+                    QueueMultiMonitorFullScreenConfirmation(
+                        "用户点击全屏",
+                        Volatile.Read(ref _rdpConnectionGeneration));
+                else
+                    ScheduleMultiMonitorRecovery(
+                        "点击全屏后 mstscax 同步拒绝请求",
+                        System.Windows.Forms.Screen.AllScreens.Length);
+            }
+        }
+
+        private void OnConsoleMinimizeRequested()
+        {
+            if (_closing) return;
+            if (_useAllMonitors)
+            {
+                FinishManualDisplayRefit();
+                _multiMonitorUserMinimized = true;
+                CancelMultiMonitorRecovery();
+            }
+            WindowState = WindowState.Minimized;
+        }
+
+        private void OnConsoleCloseRequested()
+        {
+            if (_closing) return;
+            _closing = true;
+            Close();
+        }
+
+        private void OnRefitDisplaysRequested()
+        {
+            if (!_useAllMonitors
+                || _closing
+                || _reconnectPending
+                || _weInitiatedDisconnect
+                || RdpHost.ConnectionState != 1
+                || _vm.IsRefittingDisplays
+                || _multiMonitorRecoveryState.SessionLocked
+                || _multiMonitorUserMinimized
+                || !_sessionRegistry.CanUseConsole(_session.Stamp))
+                return;
+
+            _vm.IsRefittingDisplays = true;
+            MultiMonitorTopology topology = CaptureMultiMonitorTopology();
+            _multiMonitorRecoveryState.RequestFullScreen();
+            Interlocked.Exchange(ref _potentialUserLeaveGeneration, 0);
+            _expectedRecoveryFailureLeave.Clear();
+            ScheduleMultiMonitorRecovery(
+                "用户手动重新适配屏幕",
+                expectedMonitorCount: topology.MonitorCount,
+                forceReconnect: true);
+        }
+
+        private void FinishManualDisplayRefit()
+        {
+            if (_vm.IsRefittingDisplays)
+                _vm.IsRefittingDisplays = false;
+        }
+
+        private int ArmExpectedRecoveryFailureLeave()
+        {
+            int leaveGeneration = Interlocked.Increment(ref _recoveryFailureLeaveGeneration);
+            if (leaveGeneration <= 0)
+            {
+                Interlocked.Exchange(ref _recoveryFailureLeaveGeneration, 1);
+                leaveGeneration = 1;
+            }
+            _expectedRecoveryFailureLeave.Arm(leaveGeneration);
+            _ = ExpireExpectedRecoveryFailureLeaveAsync(leaveGeneration);
+            return leaveGeneration;
+        }
+
+        private void QueueMultiMonitorFullScreenConfirmation(
+            string trigger,
+            int connectionGeneration)
+        {
+            if (!_useAllMonitors || _closing) return;
+            int confirmationGeneration = Interlocked.Increment(
+                ref _fullScreenConfirmationGeneration);
+            _ = ConfirmMultiMonitorFullScreenAsync(
+                trigger,
+                connectionGeneration,
+                confirmationGeneration);
+        }
+
+        private async Task ConfirmMultiMonitorFullScreenAsync(
+            string trigger,
+            int connectionGeneration,
+            int confirmationGeneration)
+        {
+            try
+            {
+                await Task.Delay(MultiMonitorFullScreenConfirmationTimeoutMs);
+                if (Dispatcher.HasShutdownStarted) return;
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (_closing
+                        || confirmationGeneration != Volatile.Read(ref _fullScreenConfirmationGeneration)
+                        || connectionGeneration != Volatile.Read(ref _rdpConnectionGeneration)
+                        || RdpHost.ConnectionState != 1
+                        || !_multiMonitorRecoveryState.FullScreenDesired
+                        || _multiMonitorRecoveryState.SessionLocked
+                        || _multiMonitorUserMinimized)
+                        return;
+
+                    if (_isFullScreen)
+                    {
+                        QueueMultiMonitorPlacementVerification();
+                        return;
+                    }
+
+                    if (!RdpHost.IsFullScreen)
+                    {
+                        ScheduleMultiMonitorRecovery(
+                            $"{trigger}确认时 mstscax 尚未进入全屏",
+                            System.Windows.Forms.Screen.AllScreens.Length);
+                        return;
+                    }
+
+                    AppLog.Warning("RDP 控制台", "mstscax 未确认容器全屏事件，正在主动同步窗口。",
+                        ConsoleLogContext(new Dictionary<string, object?>
+                        {
+                            ["Trigger"] = trigger,
+                            ["ConnectionGeneration"] = connectionGeneration,
+                        }));
+                    bool applied = SetMultiMonitorFullScreenState(true);
+                    if (!applied)
+                        RollbackNativeFullScreenAfterContainerFailure(
+                            $"{trigger}确认超时后容器铺设失败",
+                            connectionGeneration);
+                });
+            }
+            catch (Exception ex)
+            {
+                if (!_closing)
+                    AppLog.Warning("RDP 控制台", "确认多显示器全屏状态时发生异常。",
+                        ConsoleLogContext(new Dictionary<string, object?>
+                        {
+                            ["Trigger"] = trigger,
+                            ["ConnectionGeneration"] = connectionGeneration,
+                        }), ex);
+            }
+        }
+
+        private void RollbackNativeFullScreenAfterContainerFailure(
+            string trigger,
+            int connectionGeneration)
+        {
+            ArmExpectedRecoveryFailureLeave();
+            bool rdpWindowed = RdpHost.SetFullScreen(false);
+            AppLog.Warning("RDP 控制台", "原生全屏已回滚，因为容器未能铺满本机显示器。",
+                ConsoleLogContext(new Dictionary<string, object?>
+                {
+                    ["Trigger"] = trigger,
+                    ["ConnectionGeneration"] = connectionGeneration,
+                    ["RdpWindowed"] = rdpWindowed,
+                }));
+        }
+
+        private async Task VerifyManualDisplayRefitFullScreenAsync(
+            int connectionGeneration,
+            int recoveryGeneration)
+        {
+            try
+            {
+                await Task.Delay(ManualDisplayRefitConfirmationTimeoutMs);
+                if (Dispatcher.HasShutdownStarted) return;
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (_closing
+                        || !_vm.IsRefittingDisplays
+                        || connectionGeneration != Volatile.Read(ref _rdpConnectionGeneration)
+                        || recoveryGeneration != Volatile.Read(ref _multiMonitorRecoveryGeneration))
+                        return;
+
+                    if (_isFullScreen)
+                    {
+                        QueueMultiMonitorPlacementVerification();
+                        return;
+                    }
+
+                    ScheduleMultiMonitorRecovery(
+                        "重新连接后未收到多显示器全屏确认",
+                        System.Windows.Forms.Screen.AllScreens.Length);
+                });
+            }
+            catch (Exception ex)
+            {
+                if (!_closing)
+                    AppLog.Warning("RDP 控制台", "等待多显示器全屏确认时发生异常。",
+                        ConsoleLogContext(new Dictionary<string, object?>
+                        {
+                            ["ConnectionGeneration"] = connectionGeneration,
+                        }), ex);
+                FinishManualDisplayRefit();
+            }
         }
 
         void IHostConsoleWindow.Activate()
         {
             if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
             Activate();
+            ResumeMultiMonitorAfterMinimize("用户重新激活控制台");
         }
 
         private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -349,6 +1491,7 @@ namespace ExHyperV.Views
             if (_closing) return;   // 正在关闭：不再重连（避免连接栏关闭后被轮询重连"复活"）
             if (!_sessionRegistry.CanUseConsole(_session.Stamp))
             {
+                FinishManualDisplayRefit();
                 if (RdpHost.ConnectionState != 0)
                 {
                     _weInitiatedDisconnect = true;
@@ -369,6 +1512,7 @@ namespace ExHyperV.Views
             // 保持未连接而不静默降级到单屏基本会话。
             if (_useAllMonitors && (!_vm.IsEnhancedMode || !_vm.IsEnhancedAvailable))
             {
+                FinishManualDisplayRefit();
                 if (RdpHost.ConnectionState != 0)
                 {
                     _weInitiatedDisconnect = true;
@@ -394,20 +1538,37 @@ namespace ExHyperV.Views
                         _postLoginWidth = initialWidth;
                         _postLoginHeight = initialHeight;
                     }
-                    Interlocked.Increment(ref _rdpConnectionGeneration);
-                    RdpHost.Connect(BuildHyperVSettings(
+                    int connectionGeneration = Interlocked.Increment(ref _rdpConnectionGeneration);
+                    MultiMonitorTopology? connectionTopology = null;
+                    if (_useAllMonitors)
+                    {
+                        connectionTopology = CaptureMultiMonitorTopology();
+                        _pendingMultiMonitorConnectionTopology = connectionTopology;
+                        _pendingMultiMonitorConnectionGeneration = connectionGeneration;
+                    }
+                    bool connectionStarted = RdpHost.Connect(BuildHyperVSettings(
                         _session,
                         _vm.IsEnhancedMode,
                         initialWidth,
                         initialHeight,
                         desktopScale,
-                        _useAllMonitors));
+                        _useAllMonitors,
+                        connectionTopology));
+                    if (!connectionStarted)
+                    {
+                        _pendingMultiMonitorConnectionTopology = null;
+                        FinishManualDisplayRefit();
+                    }
                 }
             }
-            else if (RdpHost.ConnectionState != 0)   // VM 停了但还连着 → 断（保持窗口，等轮询到 VM 重启再连）
+            else
             {
-                _weInitiatedDisconnect = true;
-                RdpHost.Disconnect();
+                FinishManualDisplayRefit();
+                if (RdpHost.ConnectionState != 0)   // VM 停了但还连着 → 断（保持窗口，等轮询到 VM 重启再连）
+                {
+                    _weInitiatedDisconnect = true;
+                    RdpHost.Disconnect();
+                }
             }
         }
 
@@ -418,7 +1579,8 @@ namespace ExHyperV.Views
             int reuseWidth,
             int reuseHeight,
             uint desktopScale,
-            bool useAllMonitors = false)
+            bool useAllMonitors = false,
+            MultiMonitorTopology? multiMonitorTopology = null)
         {
             var id = session.VmId.ToString("D").ToUpperInvariant();
             var virtualScreen = System.Windows.Forms.SystemInformation.VirtualScreen;
@@ -436,8 +1598,12 @@ namespace ExHyperV.Views
                 ConnectionTimeoutSeconds = ConnectTimeoutSeconds,
                 // UseMultimon 发送逐显示器拓扑；初始桌面尺寸显式使用虚拟桌面联合边界，
                 // 避免 0 回落成 1100x820 的嵌入控件尺寸并产生横向滚动条。
-                DesktopWidth = useAllMonitors ? virtualScreen.Width : enhanced ? reuseWidth : 0,
-                DesktopHeight = useAllMonitors ? virtualScreen.Height : enhanced ? reuseHeight : 0,
+                DesktopWidth = useAllMonitors
+                    ? multiMonitorTopology?.Width ?? virtualScreen.Width
+                    : enhanced ? reuseWidth : 0,
+                DesktopHeight = useAllMonitors
+                    ? multiMonitorTopology?.Height ?? virtualScreen.Height
+                    : enhanced ? reuseHeight : 0,
                 DesktopScaleFactor = enhanced && !useAllMonitors ? desktopScale : 100,
                 DeviceScaleFactor = 100,
                 PreConnectionBlob = enhanced ? $"{id};EnhancedMode=1" : id,
@@ -446,20 +1612,32 @@ namespace ExHyperV.Views
         }
 
         // ── 全屏 / 窗口尺寸 ─────────────────────────────────────────────────
-        private void SetMultiMonitorFullScreenState(bool fullScreen)
+        private bool SetMultiMonitorFullScreenState(
+            bool fullScreen,
+            bool scheduleRecoveryOnFailure = true,
+            bool queuePlacementVerification = true)
         {
             bool applied = fullScreen
-                ? EnterMultiMonitorFullScreen()
+                ? EnterMultiMonitorFullScreen(queuePlacementVerification)
                 : ExitMultiMonitorFullScreen();
-            if (fullScreen && !applied && !_closing && RdpHost.ConnectionState == 1)
-                RdpHost.SetFullScreen(false);
             bool state = fullScreen && applied;
             _syncingFs = true;
             _vm.IsFullScreen = state;
             _syncingFs = false;
+            if (fullScreen
+                && !applied
+                && scheduleRecoveryOnFailure
+                && !_closing
+                && RdpHost.ConnectionState == 1
+                && _multiMonitorRecoveryState.FullScreenDesired
+                && !_multiMonitorUserMinimized)
+                ScheduleMultiMonitorRecovery(
+                    "多显示器全屏窗口铺设失败",
+                    System.Windows.Forms.Screen.AllScreens.Length);
+            return state;
         }
 
-        private bool EnterMultiMonitorFullScreen()
+        private bool EnterMultiMonitorFullScreen(bool queuePlacementVerification = true)
         {
             if (!_useAllMonitors || _isFullScreen) return _isFullScreen;
             if (_closing || RdpHost.ConnectionState != 1) return false;
@@ -487,23 +1665,18 @@ namespace ExHyperV.Views
                 return false;
             }
 
+            using MultiMonitorWindowPlacementScope placementScope =
+                BeginMultiMonitorWindowPlacement();
             _multiMonitorRestoreValid = true;
-            _multiMonitorRestoreStyle = WindowStyle;
-            _multiMonitorRestoreResizeMode = ResizeMode;
-            _multiMonitorRestoreBackdrop = WindowBackdropType;
-            _multiMonitorRestoreBackground = Background;
+            _multiMonitorRestoreStyleLocalValue = ReadLocalValue(WindowStyleProperty);
+            _multiMonitorRestoreResizeModeLocalValue = ReadLocalValue(ResizeModeProperty);
+            _multiMonitorRestoreBackdropLocalValue = ReadLocalValue(WindowBackdropTypeProperty);
+            _multiMonitorRestoreCornerLocalValue = ReadLocalValue(WindowCornerPreferenceProperty);
+            _multiMonitorRestoreTopmostLocalValue = ReadLocalValue(TopmostProperty);
             _multiMonitorRestoreTopmost = Topmost;
 
             _isFullScreen = true;
-            if (WindowState != WindowState.Normal) WindowState = WindowState.Normal;
-            WindowBackdropType = WindowBackdropType.None;
-            Background = System.Windows.Media.Brushes.Black;
-            WindowStyle = WindowStyle.None;
-            ResizeMode = ResizeMode.NoResize;
-            Topmost = true;
-
-            uint noBorder = DWMWA_COLOR_NONE;
-            DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref noBorder, sizeof(uint));
+            ApplyMultiMonitorFullScreenVisuals(hwnd);
             bool positioned = SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
@@ -530,7 +1703,7 @@ namespace ExHyperV.Views
                 return false;
             }
 
-            QueueMultiMonitorPlacementVerification();
+            if (queuePlacementVerification) QueueMultiMonitorPlacementVerification();
 
             AppLog.Information("RDP 控制台", "控制台窗口已铺到所有本机显示器。",
                 ConsoleLogContext(new Dictionary<string, object?>
@@ -558,48 +1731,48 @@ namespace ExHyperV.Views
             {
                 try
                 {
-                    if (_closing || !_isFullScreen || RdpHost.ConnectionState != 1) return;
+                    if (_closing
+                        || !_isFullScreen
+                        || _multiMonitorUserMinimized
+                        || WindowState == WindowState.Minimized
+                        || RdpHost.ConnectionState != 1)
+                        return;
 
+                    using MultiMonitorWindowPlacementScope placementScope =
+                        BeginMultiMonitorWindowPlacement();
                     IntPtr hwnd = new WindowInteropHelper(this).Handle;
-                    var virtualScreen = System.Windows.Forms.SystemInformation.VirtualScreen;
-                    bool positioned = hwnd != IntPtr.Zero && SetWindowPos(
-                        hwnd,
-                        HWND_TOPMOST,
-                        virtualScreen.Left,
-                        virtualScreen.Top,
-                        virtualScreen.Width,
-                        virtualScreen.Height,
-                        SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-                    bool boundsMatch = positioned
-                        && GetWindowRect(hwnd, out RECT actual)
-                        && actual.Left == virtualScreen.Left
-                        && actual.Top == virtualScreen.Top
-                        && actual.Right == virtualScreen.Right
-                        && actual.Bottom == virtualScreen.Bottom;
-                    if (!boundsMatch)
+                    MultiMonitorTopology topology = CaptureMultiMonitorTopology();
+                    string actualWindowBounds = "unavailable";
+                    string actualContentBounds = "unavailable";
+                    int error = 0;
+                    bool contentAligned = hwnd != IntPtr.Zero
+                        && TryAlignMultiMonitorContentBounds(
+                            hwnd,
+                            topology,
+                            "进入多显示器全屏",
+                            attempt: 1,
+                            out actualWindowBounds,
+                            out actualContentBounds,
+                            out error);
+                    if (!contentAligned)
                     {
-                        int error = positioned ? 0 : Marshal.GetLastWin32Error();
-                        string actualBounds = GetWindowRect(hwnd, out RECT current)
-                            ? FormatRect(current.Left, current.Top, current.Right, current.Bottom)
-                            : "unavailable";
                         AppLog.Warning("RDP 控制台", "多显示器全屏边界校准失败。",
                             ConsoleLogContext(new Dictionary<string, object?>
                             {
-                                ["ExpectedBounds"] = FormatRect(
-                                    virtualScreen.Left,
-                                    virtualScreen.Top,
-                                    virtualScreen.Right,
-                                    virtualScreen.Bottom),
-                                ["ActualBounds"] = actualBounds,
+                                ["ExpectedContentBounds"] = topology.Bounds,
+                                ["ActualContentBounds"] = actualContentBounds,
+                                ["ActualWindowBounds"] = actualWindowBounds,
                                 ["Win32Error"] = error,
                             }));
-                        SetMultiMonitorFullScreenState(false);
-                        if (!_closing && RdpHost.ConnectionState == 1)
-                            RdpHost.SetFullScreen(false);
+                        ScheduleMultiMonitorRecovery(
+                            "多显示器全屏边界校准失败",
+                            System.Windows.Forms.Screen.AllScreens.Length);
                         return;
                     }
 
-                    RdpHost.ReportMultiMonitorState("多显示器全屏边界已校准");
+                    RecordObservedMultiMonitorTopology(topology);
+                    RdpHost.ReportMultiMonitorState("多显示器全屏内容边界已校准");
+                    FinishManualDisplayRefit();
                 }
                 finally
                 {
@@ -616,9 +1789,11 @@ namespace ExHyperV.Views
                 return true;
             }
 
+            bool preserveMinimized = _multiMonitorUserMinimized
+                || WindowState == WindowState.Minimized;
             _isFullScreen = false;
             IntPtr hwnd = new WindowInteropHelper(this).Handle;
-            bool restored = RestoreMultiMonitorWindow(hwnd);
+            bool restored = RestoreMultiMonitorWindow(hwnd, preserveMinimized);
             AppLog.Information("RDP 控制台", restored
                     ? "已退出多显示器全屏并恢复控制台窗口。"
                     : "已退出多显示器全屏，但恢复窗口位置失败。",
@@ -629,18 +1804,22 @@ namespace ExHyperV.Views
             return true;
         }
 
-        private bool RestoreMultiMonitorWindow(IntPtr hwnd)
+        private bool RestoreMultiMonitorWindow(IntPtr hwnd, bool preserveMinimized = false)
         {
             if (!_multiMonitorRestoreValid || hwnd == IntPtr.Zero) return false;
 
+            using MultiMonitorWindowPlacementScope placementScope =
+                BeginMultiMonitorWindowPlacement();
+            MultiMonitorWindowRestorePlan restorePlan =
+                MultiMonitorWindowRestorePlan.Create(preserveMinimized);
             uint defaultBorder = DWMWA_COLOR_DEFAULT;
             DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref defaultBorder, sizeof(uint));
-            WindowState = WindowState.Normal;
-            WindowStyle = _multiMonitorRestoreStyle;
-            ResizeMode = _multiMonitorRestoreResizeMode;
-            Background = _multiMonitorRestoreBackground;
-            WindowBackdropType = _multiMonitorRestoreBackdrop;
-            Topmost = _multiMonitorRestoreTopmost;
+            if (restorePlan.NormalizeBeforeRestore) WindowState = WindowState.Normal;
+            RestoreLocalValue(this, WindowStyleProperty, _multiMonitorRestoreStyleLocalValue);
+            RestoreLocalValue(this, ResizeModeProperty, _multiMonitorRestoreResizeModeLocalValue);
+            RestoreLocalValue(this, WindowBackdropTypeProperty, _multiMonitorRestoreBackdropLocalValue);
+            RestoreLocalValue(this, WindowCornerPreferenceProperty, _multiMonitorRestoreCornerLocalValue);
+            RestoreLocalValue(this, TopmostProperty, _multiMonitorRestoreTopmostLocalValue);
 
             bool frameRestored = SetWindowPos(
                 hwnd,
@@ -649,11 +1828,22 @@ namespace ExHyperV.Views
                 0,
                 0,
                 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+                SWP_NOMOVE
+                    | SWP_NOSIZE
+                    | SWP_FRAMECHANGED
+                    | SWP_SHOWWINDOW
+                    | (restorePlan.NoActivate ? SWP_NOACTIVATE : 0));
             WINDOWPLACEMENT placement = _multiMonitorRestorePlacement;
             placement.Length = (uint)Marshal.SizeOf<WINDOWPLACEMENT>();
+            if (restorePlan.RestoreMinimized) placement.ShowCmd = SW_SHOWMINNOACTIVE;
             bool placementRestored = SetWindowPlacement(hwnd, ref placement);
+            if (restorePlan.RestoreMinimized) WindowState = WindowState.Minimized;
             _multiMonitorRestoreValid = false;
+            _multiMonitorRestoreStyleLocalValue = DependencyProperty.UnsetValue;
+            _multiMonitorRestoreResizeModeLocalValue = DependencyProperty.UnsetValue;
+            _multiMonitorRestoreBackdropLocalValue = DependencyProperty.UnsetValue;
+            _multiMonitorRestoreCornerLocalValue = DependencyProperty.UnsetValue;
+            _multiMonitorRestoreTopmostLocalValue = DependencyProperty.UnsetValue;
             return frameRestored && placementRestored;
         }
 
@@ -666,6 +1856,14 @@ namespace ExHyperV.Views
 
         private static string FormatRect(int left, int top, int right, int bottom) =>
             $"({left},{top})-({right},{bottom}) {right - left}x{bottom - top}";
+
+        private static bool IsFullScreenHotKeyPressed() =>
+            IsKeyPressed(VkControl)
+            && IsKeyPressed(VkMenu)
+            && IsKeyPressed(FullScreenHotKeyVk);
+
+        private static bool IsKeyPressed(int virtualKey) =>
+            (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
 
         private void EnterFullScreen()
         {
@@ -963,6 +2161,13 @@ namespace ExHyperV.Views
             // 避免登录界面的固定分辨率或来宾拒绝请求后再次污染偏好。
             _rdpTornDown = true;
             _closing = true;            // 抑制断开后的自动重连
+            FinishManualDisplayRefit();
+            _multiMonitorRecoveryState.RequestWindowed();
+            CancelMultiMonitorRecovery();
+            Interlocked.Increment(ref _systemTransitionGeneration);
+            _expectedSystemLeave.Clear();
+            _expectedRecoveryFailureLeave.Clear();
+            UnsubscribeMultiMonitorSystemEvents();
             Interlocked.Increment(ref _rdpConnectionGeneration);
             if (_isFullScreen && _useAllMonitors)
                 ExitMultiMonitorFullScreen();
@@ -973,9 +2178,16 @@ namespace ExHyperV.Views
         {
             base.OnClosed(e);
             _closing = true;
+            _multiMonitorRecoveryState.RequestWindowed();
+            CancelMultiMonitorRecovery();
+            Interlocked.Increment(ref _systemTransitionGeneration);
+            _expectedSystemLeave.Clear();
+            _expectedRecoveryFailureLeave.Clear();
+            UnsubscribeMultiMonitorSystemEvents();
             if (!_rdpTornDown) { _rdpTornDown = true; RdpHost.ShutdownAndDispose(); }  // 兜底：OnClosing 未跑到时
             _vm.SendCadRequested -= OnSendCadRequested;
             _vm.FullScreenToggleRequested -= OnFullScreenToggleRequested;
+            _vm.RefitDisplaysRequested -= OnRefitDisplaysRequested;
             _vm.PropertyChanged -= OnViewModelPropertyChanged;
             _vm.Polled -= OnVmPolled;
             _sessionRegistry.Changed -= OnHostRegistryChanged;
@@ -995,6 +2207,8 @@ namespace ExHyperV.Views
         private const int WM_ENTERSIZEMOVE = 0x0231;
         private const int WM_EXITSIZEMOVE = 0x0232;
         private const int WM_DPICHANGED = 0x02E0;
+        private const int WM_DISPLAYCHANGE = 0x007E;
+        private const uint SW_SHOWMINNOACTIVE = 7;
         private const int MONITOR_DEFAULTTONEAREST = 0x00000002;
         private const int DWMWA_BORDER_COLOR = 34;          // Win11：窗口边框颜色（全屏置 None 去白边）
         private const uint DWMWA_COLOR_NONE = 0xFFFFFFFE;   // 不画边框
@@ -1002,8 +2216,14 @@ namespace ExHyperV.Views
 
         private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
-            if (msg == WM_DPICHANGED && _useAllMonitors && _isFullScreen)
-                QueueMultiMonitorPlacementVerification();
+            if (msg == WM_DISPLAYCHANGE && _useAllMonitors)
+                QueueMultiMonitorSystemTransition("WM_DISPLAYCHANGE");
+            else if (msg == WM_DPICHANGED
+                && MultiMonitorDisplayEventPolicy.ShouldQueueDpiRecovery(
+                    _useAllMonitors,
+                    Volatile.Read(ref _potentialUserLeaveGeneration) != 0,
+                    IsMultiMonitorDpiRecoverySuppressed()))
+                QueueMultiMonitorSystemTransition("WM_DPICHANGED");
             if (msg == WM_NCHITTEST && _vm.IsFullScreen)
             {
                 handled = true;
@@ -1088,6 +2308,7 @@ namespace ExHyperV.Views
         private static readonly IntPtr HWND_NOTOPMOST = new(-2);
         private const uint SWP_NOSIZE = 0x0001;
         private const uint SWP_NOMOVE = 0x0002;
+        private const uint SWP_NOACTIVATE = 0x0010;
         private const uint SWP_FRAMECHANGED = 0x0020;
         private const uint SWP_SHOWWINDOW = 0x0040;
         [DllImport("user32.dll", SetLastError = true)]
@@ -1103,6 +2324,8 @@ namespace ExHyperV.Views
         private static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT placement);
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool SetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT placement);
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int virtualKey);
         [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref uint value, int size);
         [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hWnd);
 

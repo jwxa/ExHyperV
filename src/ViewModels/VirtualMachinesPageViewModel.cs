@@ -1134,6 +1134,7 @@ namespace ExHyperV.ViewModels
                 ConsoleDisplayMode? displayMode =
                     await Dialogs.ShowConsoleDisplayModeSelectionAsync();
                 if (displayMode is null) return;
+                bool forceBasicSession = false;
 
                 if (displayMode == ConsoleDisplayMode.AllMonitors)
                 {
@@ -1151,13 +1152,20 @@ namespace ExHyperV.ViewModels
                     }
                     if (enhanced.Value != true)
                     {
-                        ShowTip(Properties.Resources.ConsoleDisplayMode_EnhancedRequired);
-                        return;
+                        bool useBasicSession = await Dialogs.ShowConfirmAsync(
+                            Properties.Resources.ConsoleDisplayMode_Title,
+                            Properties.Resources.ConsoleDisplayMode_EnhancedRequired,
+                            confirmButtonText: Properties.Resources.ConsoleDisplayMode_SingleMonitor,
+                            cancelButtonText: Properties.Resources.Btn_Cancel);
+                        if (!useBasicSession) return;
+
+                        displayMode = ConsoleDisplayMode.SingleMonitor;
+                        forceBasicSession = true;
                     }
                 }
 
                 // 打开当前选中虚拟机的沉浸式控制台窗口（现走新的 RdpClientHost）
-                Navigation.OpenConsoleWindow(session, displayMode.Value);
+                Navigation.OpenConsoleWindow(session, displayMode.Value, forceBasicSession);
             }
             catch (Exception ex)
             {

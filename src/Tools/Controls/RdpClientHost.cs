@@ -33,6 +33,8 @@ namespace ExHyperV.Tools
         public event Action<int, int>? RemoteSizeChanged;
         /// <summary>RDP 控件请求容器进/出全屏（OnRequestGo/LeaveFullScreen）。</summary>
         public event Action<bool>? FullScreenRequested;
+        /// <summary>连接完成后，底层控件同步拒绝了自动进入全屏的请求。</summary>
+        public event Action? FullScreenStartFailed;
         /// <summary>连接栏最小化按钮请求（容器处理全屏下）。</summary>
         public event Action? MinimizeRequested;
         /// <summary>连接栏关闭按钮请求（容器处理全屏下）。</summary>
@@ -43,6 +45,9 @@ namespace ExHyperV.Tools
         /// <summary>0=未连接 1=已连接 2=连接中。</summary>
         public int ConnectionState => _ax.ConnectionState;
 
+        /// <summary>底层 RDP 控件当前确认的全屏状态。</summary>
+        public bool IsFullScreen => _ax.IsFullScreen;
+
         public RdpClientHost()
         {
             _ax.Connected += () => { _curtain.Visible = false; Connected?.Invoke(); };        // 连上 → 掀开黑布显示画面
@@ -51,6 +56,7 @@ namespace ExHyperV.Tools
             _ax.RemoteDesktopSizeChanged += (w, h) => RemoteSizeChanged?.Invoke(w, h);
             _ax.EnteredFullScreen += () => FullScreenRequested?.Invoke(true);
             _ax.LeftFullScreen += () => FullScreenRequested?.Invoke(false);
+            _ax.FullScreenStartFailed += () => FullScreenStartFailed?.Invoke();
             _ax.MinimizeRequested += () => MinimizeRequested?.Invoke();
             _ax.CloseRequested += () => CloseRequested?.Invoke();
             _ax.FatalError += code => FatalError?.Invoke(code);
@@ -90,12 +96,14 @@ namespace ExHyperV.Tools
             if (_ax.IsHandleCreated) _ready = true;
         }
 
-        /// <summary>用给定配方连接。OCX 未就绪时排队，句柄创建后自动补发。</summary>
-        public void Connect(RdpConnectionSettings settings)
+        /// <summary>用给定配方连接。OCX 未就绪时排队；返回 false 表示本次启动被同步拒绝。</summary>
+        public bool Connect(RdpConnectionSettings settings)
         {
             _curtain.Visible = true;   // 连接前先盖上黑布，遮住 mstscax 初始化
-            if (_ready || _ax.IsHandleCreated) _ax.ApplyAndConnect(settings);
-            else _pending = settings;
+            if (_ready || _ax.IsHandleCreated) return _ax.ApplyAndConnect(settings);
+
+            _pending = settings;
+            return true;
         }
 
         public void Disconnect() => _ax.DisconnectSafe();
@@ -134,6 +142,27 @@ namespace ExHyperV.Tools
         /// <summary>同步全屏状态给底层控件（容器处理全屏时，按钮发起的全屏需要回灌给 mstscax，
         /// 使其内部状态/键盘捕获与窗口一致；热键发起的无需，由控件自身切换）。</summary>
         public bool SetFullScreen(bool fullScreen) => _ax.SetFullScreen(fullScreen);
+
+        internal bool TryGetContentScreenBounds(out MultiMonitorPixelBounds bounds)
+        {
+            bounds = default;
+            try
+            {
+                if (_ax.IsDisposed || !_ax.IsHandleCreated) return false;
+                System.Drawing.Rectangle rectangle = _ax.RectangleToScreen(_ax.ClientRectangle);
+                if (rectangle.Width <= 0 || rectangle.Height <= 0) return false;
+                bounds = new MultiMonitorPixelBounds(
+                    rectangle.Left,
+                    rectangle.Top,
+                    rectangle.Right,
+                    rectangle.Bottom);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
 
         /// <summary>把当前多显示器协商结果和滚动条状态写入应用日志。</summary>
         public void ReportMultiMonitorState(string stage) => _ax.ReportMultiMonitorState(stage);

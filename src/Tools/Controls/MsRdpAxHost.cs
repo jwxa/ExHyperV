@@ -31,6 +31,7 @@ namespace ExHyperV.Tools
         public event Action<int, int>? RemoteDesktopSizeChanged;
         public event Action? EnteredFullScreen;
         public event Action? LeftFullScreen;
+        public event Action? FullScreenStartFailed;
         public event Action<int>? FatalError;
         public event Action? MinimizeRequested;   // 连接栏最小化按钮（容器处理全屏）
         public event Action? CloseRequested;       // 连接栏关闭按钮（容器处理全屏）
@@ -94,7 +95,8 @@ namespace ExHyperV.Tools
             }
         }
 
-        public void ApplyAndConnect(RdpConnectionSettings s)
+        /// <summary>应用连接参数并启动连接；返回 false 表示 ActiveX 在启动阶段同步拒绝了请求。</summary>
+        public bool ApplyAndConnect(RdpConnectionSettings s)
         {
             try
             {
@@ -175,8 +177,42 @@ namespace ExHyperV.Tools
                 bool useMultimonSet = TrySet("UseMultimon", () =>
                     nonScriptable5.UseMultimon = s.UseAllMonitors);
                 bool useMultimonApplied = TryGet("UseMultimon", () => nonScriptable5.UseMultimon, false);
-                TrySet("ContainerHandledFullScreen", () => adv.ContainerHandledFullScreen = 1);
-                _startFullScreenOnConnect = s.UseAllMonitors;
+                bool containerHandledFullScreenSet = TrySet(
+                    "ContainerHandledFullScreen",
+                    () => adv.ContainerHandledFullScreen = 1);
+                int containerHandledFullScreenValue = TryGet(
+                    "ContainerHandledFullScreen",
+                    () => (int)adv.ContainerHandledFullScreen,
+                    0);
+                bool containerHandledFullScreenApplied = containerHandledFullScreenValue != 0;
+                // mstscax 没有受支持的原生连接栏扩展接口；多屏模式统一显示并固定原生连接栏。
+                bool nativeConnectionBarEnabled = TrySet(
+                    "DisableConnectionBar",
+                    () => nonScriptable5.DisableConnectionBar = false);
+                bool displayConnectionBarSet = TrySet(
+                    "DisplayConnectionBar",
+                    () => adv.DisplayConnectionBar = true);
+                bool displayConnectionBarValue = TryGet(
+                    "DisplayConnectionBar",
+                    () => (bool)adv.DisplayConnectionBar,
+                    false);
+                bool displayConnectionBarApplied = displayConnectionBarValue;
+                bool pinConnectionBarSet = TrySet(
+                    "PinConnectionBar",
+                    () => adv.PinConnectionBar = true);
+                bool pinConnectionBarValue = TryGet(
+                    "PinConnectionBar",
+                    () => (bool)adv.PinConnectionBar,
+                    false);
+                bool pinConnectionBarApplied = pinConnectionBarValue;
+                bool showPinButtonSet = TrySet(
+                    "ConnectionBarShowPinButton",
+                    () => adv.ConnectionBarShowPinButton = true);
+                bool showPinButtonValue = TryGet(
+                    "ConnectionBarShowPinButton",
+                    () => (bool)adv.ConnectionBarShowPinButton,
+                    false);
+                bool showPinButtonApplied = showPinButtonValue;
 
                 if (s.UseAllMonitors)
                 {
@@ -186,6 +222,19 @@ namespace ExHyperV.Tools
                         ["Server"] = s.Server,
                         ["UseMultimonSet"] = useMultimonSet,
                         ["UseMultimonApplied"] = useMultimonApplied,
+                        ["ContainerHandledFullScreenSet"] = containerHandledFullScreenSet,
+                        ["ContainerHandledFullScreenApplied"] = containerHandledFullScreenApplied,
+                        ["ContainerHandledFullScreen"] = containerHandledFullScreenValue,
+                        ["NativeConnectionBarEnabled"] = nativeConnectionBarEnabled,
+                        ["DisplayConnectionBarSet"] = displayConnectionBarSet,
+                        ["DisplayConnectionBarApplied"] = displayConnectionBarApplied,
+                        ["DisplayConnectionBar"] = displayConnectionBarValue,
+                        ["PinConnectionBarSet"] = pinConnectionBarSet,
+                        ["PinConnectionBarApplied"] = pinConnectionBarApplied,
+                        ["PinConnectionBar"] = pinConnectionBarValue,
+                        ["ConnectionBarShowPinButtonSet"] = showPinButtonSet,
+                        ["ConnectionBarShowPinButtonApplied"] = showPinButtonApplied,
+                        ["ConnectionBarShowPinButton"] = showPinButtonValue,
                         ["LocalMonitorCount"] = Screen.AllScreens.Length,
                         ["LocalVirtualBounds"] = FormatBounds(
                             virtualScreen.Left,
@@ -193,14 +242,41 @@ namespace ExHyperV.Tools
                             virtualScreen.Right,
                             virtualScreen.Bottom),
                         ["RequestedDesktop"] = $"{s.DesktopWidth}x{s.DesktopHeight}",
-                        ["ContainerHandledFullScreen"] = 1,
+                        ["NativeConnectionBarRequested"] = true,
                     };
                     AppLog.Information("RDP 控制台", "正在建立多显示器会话。",
                         new AppLogContext(Properties: properties));
+                    if (!containerHandledFullScreenSet || !containerHandledFullScreenApplied)
+                    {
+                        AppLog.Error("RDP 控制台",
+                            "mstscax 未接受 ContainerHandledFullScreen，已阻止启动多显示器会话。",
+                            new AppLogContext(Properties: properties));
+                        _startFullScreenOnConnect = false;
+                        return false;
+                    }
+                    if (!nativeConnectionBarEnabled
+                        || !displayConnectionBarSet
+                        || !displayConnectionBarApplied
+                        || !pinConnectionBarSet
+                        || !pinConnectionBarApplied
+                        || !showPinButtonSet
+                        || !showPinButtonApplied)
+                    {
+                        AppLog.Error("RDP 控制台",
+                            "mstscax 未接受显示并固定原生连接栏，已阻止启动多显示器会话。",
+                            new AppLogContext(Properties: properties));
+                        _startFullScreenOnConnect = false;
+                        return false;
+                    }
                     if (!useMultimonSet || !useMultimonApplied)
+                    {
                         AppLog.Error("RDP 控制台", "mstscax 未接受 UseMultimon，多显示器会话无法按预期工作。",
                             new AppLogContext(Properties: properties));
+                        _startFullScreenOnConnect = false;
+                        return false;
+                    }
                 }
+                _startFullScreenOnConnect = s.UseAllMonitors;
 
                 // HotKeyFullScreen=可配置 vkey → Ctrl+Alt+<key>；KeyboardHookMode=1 → Win/Alt+Tab 等组合键只要画面有焦点就送 VM（窗口化也送，不止全屏；要切回宿主先点一下别处）。
                 TrySet("HotKeyFullScreen", () => adv.HotKeyFullScreen = s.FullScreenHotKeyVirtualKey);
@@ -212,6 +288,7 @@ namespace ExHyperV.Tools
                     TrySet("Desktop", () => { rdp.DesktopWidth = s.DesktopWidth; rdp.DesktopHeight = s.DesktopHeight; });
 
                 rdp.Connect();
+                return true;
             }
             catch (Exception ex)
             {
@@ -222,6 +299,7 @@ namespace ExHyperV.Tools
                         ["Server"] = s.Server,
                         ["UseAllMonitors"] = s.UseAllMonitors,
                     }), ex);
+                return false;
             }
         }
 
@@ -245,6 +323,12 @@ namespace ExHyperV.Tools
         public int ConnectionState
         {
             get { try { dynamic rdp = GetOcx(); return (int)rdp.Connected; } catch { return 0; } }
+        }
+
+        /// <summary>底层 mstscax 当前确认的全屏状态；读取失败按未进入全屏处理。</summary>
+        public bool IsFullScreen
+        {
+            get { try { return ((IMsRdpClient9)GetOcx()).FullScreen; } catch { return false; } }
         }
 
         /// <summary>同步控件全屏状态（容器处理全屏下，按钮发起的全屏需回灌，使 mstscax 内部状态/键盘捕获与窗口一致）。</summary>
@@ -287,8 +371,10 @@ namespace ExHyperV.Tools
                 || ConnectionState != 1)
                 return;
 
-            SetFullScreen(true);
-            ReportMultiMonitorState("已请求容器多显示器全屏");
+            if (SetFullScreen(true))
+                ReportMultiMonitorState("已请求容器多显示器全屏");
+            else
+                FullScreenStartFailed?.Invoke();
         }
 
         private void ReportMultiMonitorRemoteSize(int width, int height)
@@ -313,6 +399,20 @@ namespace ExHyperV.Tools
                 int left = 0, top = 0, right = 0, bottom = 0;
                 nonScriptable5.GetRemoteMonitorsBoundingBox(out left, out top, out right, out bottom);
                 var virtualScreen = SystemInformation.VirtualScreen;
+                string controlScreenBounds = "unavailable";
+                try
+                {
+                    var control = RectangleToScreen(ClientRectangle);
+                    controlScreenBounds = FormatBounds(
+                        control.Left,
+                        control.Top,
+                        control.Right,
+                        control.Bottom);
+                }
+                catch
+                {
+                    // 控件句柄可能正在重建；协商信息仍然有价值。
+                }
                 AppLog.Information("RDP 控制台", stage,
                     MultiMonitorLogContext(new Dictionary<string, object?>
                     {
@@ -329,6 +429,7 @@ namespace ExHyperV.Tools
                         ["FullScreen"] = rdp.FullScreen,
                         ["Desktop"] = $"{rdp.DesktopWidth}x{rdp.DesktopHeight}",
                         ["Control"] = $"{ClientSize.Width}x{ClientSize.Height}",
+                        ["ControlScreenBounds"] = controlScreenBounds,
                         ["HorizontalScrollBarVisible"] = rdp.HorizontalScrollBarVisible,
                         ["VerticalScrollBarVisible"] = rdp.VerticalScrollBarVisible,
                     }));

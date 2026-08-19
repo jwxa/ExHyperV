@@ -32,6 +32,9 @@
                         <TextBlock Text="{Binding VmName}"
            VerticalAlignment="Center"
            Margin="0,0,16,0"
+           MaxWidth="160"
+           TextTrimming="CharacterEllipsis"
+           ToolTip="{Binding VmName}"
            FontSize="12"
            FontWeight="SemiBold"
            MouseLeftButtonDown="OnHeaderMouseLeftButtonDown"
@@ -105,7 +108,8 @@
                                    Height="32"
                                    Padding="8,0" 
                                    Margin="8,0,0,0"
-                                   IsEnabled="{Binding CanChangeResolution}">
+                                   IsEnabled="{Binding CanChangeResolution}"
+                                   Visibility="{Binding UseAllMonitors, Converter={StaticResource BoolToVis}, ConverterParameter=Invert}">
                             <ui:DropDownButton.Flyout>
                                 <ContextMenu ItemsSource="{Binding Resolutions}">
                                     <ContextMenu.ItemContainerStyle>
@@ -147,7 +151,8 @@
                            FontSize="16"
                            Height="32"
                            Padding="8,0"
-                           Margin="8,0,0,0">
+                           Margin="8,0,0,0"
+                           Visibility="{Binding UseAllMonitors, Converter={StaticResource BoolToVis}, ConverterParameter=Invert}">
                             <ui:DropDownButton.Flyout>
                                 <ContextMenu>
                                     <MenuItem Header="{x:Static properties:Resources.ConsoleViewModel_BasicSession}" Command="{Binding SwitchSessionModeCommand}" CommandParameter="{x:Static properties:Resources.ConsoleViewModel_BasicSession}" IsEnabled="{Binding CanSelectBasicSession}" />
@@ -168,7 +173,6 @@
                             <ui:SymbolIcon Symbol="Keyboard24" FontSize="16" />
                         </ui:Button>
 
-                        
                         <!-- 全屏切换按钮 -->
                         <ui:Button Icon="{ui:SymbolIcon Symbol=FullScreenMaximize24}"
                                    Appearance="Transparent" Background="Transparent"
@@ -177,6 +181,16 @@
                                    Margin="8,0,0,0"
                                    Command="{Binding ToggleFullScreenCommand}"
                                    ToolTip="{x:Static properties:Resources.ConsoleWindow_FullScreen}" />
+
+                        <ui:Button Icon="{ui:SymbolIcon Symbol=ArrowSync24}"
+                                   Appearance="Transparent" Background="Transparent"
+                                   Width="38"
+                                   Height="32"
+                                   Padding="0"
+                                   Margin="8,0,0,0"
+                                   Command="{Binding RefitDisplaysCommand}"
+                                   ToolTip="{x:Static properties:Resources.ConsoleWindow_RefitDisplays}"
+                                   Visibility="{Binding UseAllMonitors, Converter={StaticResource BoolToVis}}" />
                     </StackPanel>
                 </Grid>
             </ui:TitleBar.Header>

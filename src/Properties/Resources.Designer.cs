@@ -1015,6 +1015,15 @@ namespace ExHyperV.Properties {
         }
 
         /// <summary>
+        ///   查找类似 Redetect monitors and reconnect 的本地化字符串。
+        /// </summary>
+        public static string ConsoleWindow_RefitDisplays {
+            get {
+                return ResourceManager.GetString("ConsoleWindow_RefitDisplays", resourceCulture);
+            }
+        }
+
+        /// <summary>
         ///   查找类似 适应窗口 的本地化字符串。
         /// </summary>
         public static string ConsoleWindow_ZoomAuto {

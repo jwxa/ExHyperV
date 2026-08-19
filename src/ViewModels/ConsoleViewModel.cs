@@ -32,7 +32,12 @@ namespace ExHyperV.ViewModels
 
         [ObservableProperty] private string _vmId;
         [ObservableProperty] private string _vmName;
-        [ObservableProperty] private bool _isRunning;
+        [ObservableProperty]
+        [NotifyCanExecuteChangedFor(nameof(RefitDisplaysCommand))]
+        private bool _isRunning;
+        [ObservableProperty]
+        [NotifyCanExecuteChangedFor(nameof(RefitDisplaysCommand))]
+        private bool _isRefittingDisplays;
         [ObservableProperty]
         [NotifyCanExecuteChangedFor(nameof(StartVmCommand))]
         [NotifyCanExecuteChangedFor(nameof(ShutdownVmCommand))]
@@ -46,6 +51,7 @@ namespace ExHyperV.ViewModels
         public bool IsCadAvailable => IsLocalHost && !IsEnhancedMode;
         public bool UseAllMonitors => _useAllMonitors;
         public bool CanSelectBasicSession => !_useAllMonitors;
+        public bool CanRefitDisplays => _useAllMonitors && IsRunning && !IsRefittingDisplays;
         public int InitialEnhancedWidth { get; }
         public int InitialEnhancedHeight { get; }
         
@@ -72,7 +78,8 @@ namespace ExHyperV.ViewModels
         public ConsoleViewModel(
             HostConsoleSession session,
             IHostSessionRegistry sessionRegistry,
-            bool useAllMonitors = false)
+            bool useAllMonitors = false,
+            bool forceBasicSession = false)
         {
             _session = session ?? throw new ArgumentNullException(nameof(session));
             _sessionRegistry = sessionRegistry ?? throw new ArgumentNullException(nameof(sessionRegistry));
@@ -93,8 +100,9 @@ namespace ExHyperV.ViewModels
             // 使用保存的分辨率直接建立增强会话；无保存值时先由基本会话取得分辨率。
             // 多监视器是增强会话能力；本次启动选项优先于保存的单/增强会话偏好，
             // 但不写回全局设置，避免一次性显示选择改变后续控制台行为。
-            _preferEnhanced = _useAllMonitors
-                || SettingsService.GetDefaultConnectionMode() == ModeEnhancedToken;
+            _preferEnhanced = !forceBasicSession
+                && (_useAllMonitors
+                    || SettingsService.GetDefaultConnectionMode() == ModeEnhancedToken);
             var savedResolution = SettingsService.GetDefaultConsoleResolution();
             InitialEnhancedWidth = savedResolution?.Width ?? DefaultEnhancedWidth;
             InitialEnhancedHeight = savedResolution?.Height ?? DefaultEnhancedHeight;
@@ -114,6 +122,7 @@ namespace ExHyperV.ViewModels
         /// <see cref="IsFullScreen"/> 仅在收到容器进入/退出事件后更新。
         /// </summary>
         public event Action? FullScreenToggleRequested;
+        public event Action? RefitDisplaysRequested;
 
         [RelayCommand]
         private void ToggleFullScreen()
@@ -126,6 +135,9 @@ namespace ExHyperV.ViewModels
 
             IsFullScreen = !IsFullScreen;
         }
+
+        [RelayCommand(CanExecute = nameof(CanRefitDisplays))]
+        private void RefitDisplays() => RefitDisplaysRequested?.Invoke();
 
         // ===== 状态轮询 =====
 

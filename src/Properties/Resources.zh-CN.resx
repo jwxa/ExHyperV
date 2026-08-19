@@ -2230,7 +2230,7 @@
     <value>使用单个监视器</value>
   </data>
   <data name="ConsoleDisplayMode_EnhancedRequired" xml:space="preserve">
-    <value>使用所有监视器需要增强会话；当前虚拟机尚未提供增强会话，请改用单个监视器或稍后重试。</value>
+    <value>当前虚拟机未提供增强会话，无法使用所有监视器。是否改用单个监视器的普通会话连接？</value>
   </data>
   <data name="HostPageViewModel_DisablingHyperV" xml:space="preserve">
     <value>正在禁用 Hyper-V 组件...</value>
@@ -2318,6 +2318,9 @@
   </data>
   <data name="ConsoleWindow_FullScreen" xml:space="preserve">
     <value>全屏模式 (Ctrl+Alt+Space)</value>
+  </data>
+  <data name="ConsoleWindow_RefitDisplays" xml:space="preserve">
+    <value>重新检测显示器并重新连接</value>
   </data>
   <data name="ConsoleWindow_ZoomAuto" xml:space="preserve">
     <value>自动</value>

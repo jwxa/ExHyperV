@@ -30,13 +30,16 @@ namespace ExHyperV.Interaction
             OpenConsoleWindow(session, ConsoleDisplayMode.SingleMonitor);
 
         /// <summary>打开虚拟机沉浸式控制台窗口；若该 VM 已有窗口则前置，不新开。</summary>
-        public static void OpenConsoleWindow(HostConsoleSession session, ConsoleDisplayMode displayMode)
+        public static void OpenConsoleWindow(
+            HostConsoleSession session,
+            ConsoleDisplayMode displayMode,
+            bool forceBasicSession = false)
         {
             ArgumentNullException.ThrowIfNull(session);
             IHostConsoleRegistry registry = HostConsoleWindows.Registry;
             if (registry.TryActivate(session.WindowKey)) return;
 
-            var window = new ConsoleWindow(session, displayMode);
+            var window = new ConsoleWindow(session, displayMode, forceBasicSession);
             registry.Register(session, window);
             window.Closed += (_, _) => registry.Unregister(session.WindowKey, window);
             try

@@ -99,7 +99,8 @@ namespace ExHyperV.Interaction
                 Title = Properties.Resources.ConsoleDisplayMode_Title,
                 // 三个中文按钮需要同时保留完整标签；默认 ContentDialog 宽度约 320 DIP，
                 // 会把“使用所有监视器/使用单个监视器”截断为省略号。
-                DialogWidth = 480,
+                DialogWidth = 640,
+                DialogMaxWidth = 640,
                 Content = new TextBlock
                 {
                     Text = Properties.Resources.ConsoleDisplayMode_Message,
@@ -114,6 +115,7 @@ namespace ExHyperV.Interaction
                 SecondaryButtonAppearance = ControlAppearance.Secondary,
                 DialogHostEx = dialogHost
             };
+            ConsoleDisplayModeDialogLayout.EnsureButtonsFit(dialog);
 
             ContentDialogResult result = await dialog.ShowAsync(CancellationToken.None);
             return result switch

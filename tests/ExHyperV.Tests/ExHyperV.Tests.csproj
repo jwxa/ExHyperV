@@ -12,6 +12,10 @@
     <Using Include="System.IO" />
     <PackageReference Include="System.Management" Version="10.0.8" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <Reference Include="Wpf.Ui">
+      <HintPath>..\..\src\libs\Wpf.Ui.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
 
     <Compile Include="..\..\src\Services\Shared\Logging\*.cs" Link="Logging\%(Filename)%(Extension)" />
     <Compile Include="..\..\src\Services\Shared\AppDataPaths.cs" Link="Shared\AppDataPaths.cs" />
@@ -32,6 +36,8 @@
     <Compile Include="..\..\src\Services\Remote\Consoles\*.cs" Link="RemoteConsoles\%(Filename)%(Extension)" />
     <Compile Include="..\..\src\Tools\Api\ApiResponse.cs" Link="Tools\ApiResponse.cs" />
     <Compile Include="..\..\src\Tools\Api\WmiApi.cs" Link="Tools\WmiApi.cs" />
+    <Compile Include="..\..\src\Tools\Controls\MultiMonitorRecoveryState.cs" Link="Tools\MultiMonitorRecoveryState.cs" />
+    <Compile Include="..\..\src\Interaction\ConsoleDisplayModeDialogLayout.cs" Link="Interaction\ConsoleDisplayModeDialogLayout.cs" />
     <Compile Include="..\ExHyperV.IntegrationTests\IntegrationOptions.cs" Link="Integration\IntegrationOptions.cs" />
     <Compile Include="..\ExHyperV.IntegrationTests\AcceptanceReport.cs" Link="Integration\AcceptanceReport.cs" />
     <Compile Include="..\ExHyperV.IntegrationTests\DisconnectAcceptanceObserver.cs" Link="Integration\DisconnectAcceptanceObserver.cs" />

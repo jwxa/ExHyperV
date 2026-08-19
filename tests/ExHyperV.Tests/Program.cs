@@ -37,6 +37,7 @@ tests.AddRange(HostDisconnectTests.All);
 tests.AddRange(HostOperationRouterTests.All);
 tests.AddRange(VirtualMachinesMultiHostWiringTests.All);
 tests.AddRange(ConsoleSessionTests.All);
+tests.AddRange(ConnectionBarRegressionTests.All);
 tests.AddRange(HostConsoleRegistryTests.All);
 tests.AddRange(HostLogFeedTests.All);
 tests.AddRange(HostLogViewModelTests.All);
